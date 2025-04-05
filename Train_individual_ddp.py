@@ -2,9 +2,14 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 import numpy as np
 import random
+from datetime import timedelta
+import gc
 import scipy.stats as stats
 from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import peak_signal_noise_ratio as psnr
@@ -15,6 +20,7 @@ from model_hub.Attention_Unet import AttentionUNet
 from model_hub.UnetPlus import UNetPlusPlus
 from model_hub.Residual_UnetPlus import ResidualUNetPlusPlus
 import argparse
+
 
 def seed_everything(seed):
     random.seed(seed)
@@ -68,14 +74,14 @@ class BiasCorrectionDataset(Dataset):
                 if self.input_stats is not None and var in self.input_stats:
                     mean, std = self.input_stats[var]['mean'], self.input_stats[var]['std']
                     
-                    # # Handle different dimensions between data and statistics
-                    # if mean.ndim != var_data.ndim:
-                    #     # Reshape mean and std to match var_data dimensions for proper broadcasting
-                    #     if var_data.ndim == 2 and mean.ndim == 1:
-                    #         # For 2D data like (720, 1440) and 1D stats like (365,)
-                    #         # Assume the stats are per-day, reshape to apply properly
-                    #         mean = np.mean(mean)  # Use a single global mean
-                    #         std = np.mean(std)    # Use a single global std
+                    # Handle different dimensions between data and statistics
+                    if mean.ndim != var_data.ndim:
+                        # Reshape mean and std to match var_data dimensions for proper broadcasting
+                        if var_data.ndim == 2 and mean.ndim == 1:
+                            # For 2D data like (720, 1440) and 1D stats like (365,)
+                            # Assume the stats are per-day, reshape to apply properly
+                            mean = np.mean(mean)  # Use a single global mean
+                            std = np.mean(std)    # Use a single global std
                     
                     # Normalize with broadcasting
                     var_data = (var_data - mean) / (std + 1e-8)  # Add epsilon to avoid division by zero
@@ -97,13 +103,13 @@ class BiasCorrectionDataset(Dataset):
                 if self.target_stats is not None and var in self.target_stats:
                     mean, std = self.target_stats[var]['mean'], self.target_stats[var]['std']
                     
-                    # # Handle different dimensions between data and statistics
-                    # if mean.ndim != var_data.ndim:
-                    #     # Reshape mean and std to match var_data dimensions for proper broadcasting
-                    #     if var_data.ndim == 2 and mean.ndim == 1:
-                    #         # For 2D data like (720, 1440) and 1D stats like (365,)
-                    #         mean = np.mean(mean)  # Use a single global mean
-                    #         std = np.mean(std)    # Use a single global std
+                    # Handle different dimensions between data and statistics
+                    if mean.ndim != var_data.ndim:
+                        # Reshape mean and std to match var_data dimensions for proper broadcasting
+                        if var_data.ndim == 2 and mean.ndim == 1:
+                            # For 2D data like (720, 1440) and 1D stats like (365,)
+                            mean = np.mean(mean)  # Use a single global mean
+                            std = np.mean(std)    # Use a single global std
                     
                     # Normalize with broadcasting
                     var_data = (var_data - mean) / (std + 1e-8)  # Add epsilon to avoid division by zero
@@ -124,173 +130,6 @@ class BiasCorrectionDataset(Dataset):
             input_tensor, target_tensor = self.transform(input_tensor, target_tensor)
         
         return input_tensor, target_tensor
-
-
-
-def train_unet_individual_lead_time(model, train_dataset, val_dataset, criterion, optimizer, 
-                                    lead_time, dataset_name='bias_correction', num_epochs=200, 
-                                    batch_size=32, patience=5, device=None):
-
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    print("We are using ", device)
-    
-    print(f"\n🔹 Training Model for Lead Time = {lead_time} hours")
-    
-    # Create data loaders for train and validation
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True,
-        num_workers=4
-    )
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size, 
-        shuffle=False,
-        num_workers=4
-    )
-    
-    # Early stopping tracking
-    epochs_no_improve = 0
-    best_val_loss = float('inf')
-    
-    # Track losses
-    train_losses = []
-    val_losses = []
-    batch_losses = []  # Track individual batch losses
-    
-    # Train for specified number of epochs
-    for epoch in range(num_epochs):
-        # Training phase
-        model.train()
-        train_epoch_loss = 0.0
-        epoch_batch_losses = []  # Track batch losses for current epoch
-        
-        for batch_idx, (batch_inputs, batch_targets) in enumerate(train_loader):
-            batch_inputs = batch_inputs.to(device)
-            batch_targets = batch_targets.to(device)
-            
-            optimizer.zero_grad()
-            outputs = model(batch_inputs)
-            loss = criterion(outputs, batch_targets)
-            
-            loss.backward()
-            optimizer.step()
-            
-            # Record batch loss
-            batch_loss = loss.item()
-            epoch_batch_losses.append(batch_loss)
-            
-            # Log every 10 batches
-            if (batch_idx + 1) % 1 == 0:
-                print(f"  Lead Time {lead_time}, Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)}, "
-                      f"Batch Loss: {batch_loss:.4f}")
-            
-            train_epoch_loss += batch_loss
-        
-        # Store batch losses for this epoch
-        batch_losses.append(epoch_batch_losses)
-        
-        # Validation phase
-        model.eval()
-        val_epoch_loss = 0.0
-        
-        with torch.no_grad():
-            for batch_inputs, batch_targets in val_loader:
-                batch_inputs = batch_inputs.to(device)
-                batch_targets = batch_targets.to(device)
-                
-                outputs = model(batch_inputs)
-                loss = criterion(outputs, batch_targets)
-                
-                val_epoch_loss += loss.item()
-        
-        # Average losses
-        avg_train_loss = train_epoch_loss / len(train_loader)
-        avg_val_loss = val_epoch_loss / len(val_loader)
-        
-        train_losses.append(avg_train_loss)
-        val_losses.append(avg_val_loss)
-        
-        # Print progress
-        print(f"Lead Time {lead_time}, Epoch {epoch+1}/{num_epochs}, "
-              f"Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
-        
-        # Early stopping logic
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            epochs_no_improve = 0
-            
-            # Save best model
-            torch.save(model.state_dict(), f'checkpoint/{dataset_name}_lead_time_{lead_time}_best.pth')
-        else:
-            epochs_no_improve += 1
-        
-        # Early stopping condition
-        if epochs_no_improve >= patience:
-            print(f"Early stopping at epoch {epoch+1}")
-            break
-    
-    return {
-        'lead_time': lead_time,
-        'train_losses': train_losses,
-        'val_losses': val_losses,
-        'batch_losses': batch_losses,  # Return all batch losses
-        'best_val_loss': best_val_loss
-    }
-
-
-def evaluate_model(model, test_loader, device, target_stats=None):
-    """
-    Evaluate the model on test data and collect predictions
-    
-    Args:
-        model (nn.Module): Trained UNet model
-        test_loader (DataLoader): Test data loader
-        device (torch.device): Device to run evaluation on
-        target_stats (dict, optional): Statistics to denormalize predictions
-    
-    Returns:
-        Tuple of (all_truths, all_predictions)
-    """
-    model.eval()
-    all_truths = []
-    all_predictions = []
-    
-    with torch.no_grad():
-        for batch_inputs, batch_targets in test_loader:
-            batch_inputs = batch_inputs.to(device)
-            batch_targets = batch_targets.cpu().numpy().squeeze(axis=1)
-            
-            # Move model predictions to CPU for numpy conversion
-            outputs = model(batch_inputs).cpu().numpy().squeeze(axis=1)
-            
-            all_truths.append(batch_targets)
-            all_predictions.append(outputs)
-    
-    # Concatenate all batches
-    all_truths = np.concatenate(all_truths, axis=0)
-    all_predictions = np.concatenate(all_predictions, axis=0)
-
-    print ("Evaluation Shape:")
-    print ("Truth: ", all_truths.shape)
-    print ("Predictions: ", all_predictions.shape)
-
-    # Denormalize predictions and truths if stats are provided
-    # Denormalize predictions and truths if stats are provided
-    if target_stats is not None:
-        for i, var in enumerate(test_loader.dataset.output_variables):
-            if var in target_stats:
-                mean, std = target_stats[var]['mean'], target_stats[var]['std']
-
-                print(f"Denormalizing {var} with scalar mean={mean}, std={std}")
-
-                all_truths = all_truths * (std + 1e-8) + mean
-                all_predictions = all_predictions * (std + 1e-8) + mean
-
-    return all_truths, all_predictions
 
 
 def normalize(float_array, vmax, vmin):
@@ -505,33 +344,16 @@ def calculate_metrics(truths, predictions, return_p_value=False):
     return metrics
 
 
-
 def save_results(dataset_name, lead_time, test_truths, test_predictions, metrics, 
                 output_variables):
-    """
-    Save test results and metrics for a given dataset
-    
-    Args:
-        dataset_name (str): Name of the dataset (e.g., 'bias_correction')
-        lead_time (int): Lead time in hours
-        test_truths (numpy.ndarray): Ground truth values
-        test_predictions (numpy.ndarray): Model predictions
-        metrics (dict): Calculated evaluation metrics
-        output_variables (list): List of output variable names
-        specific_indices (list, optional): Specific indices to extract
-    """
+
     # Create results directory with dataset name and lead time
-    results_dir = f'{dataset_name}_results/lead_time_{lead_time}'
+    results_dir = f'Results/{dataset_name}_results/lead_time_{lead_time}'
     os.makedirs(results_dir, exist_ok=True)
     
     # Save numpy arrays
     np.save(f'{results_dir}/test_truths.npy', test_truths)
     np.save(f'{results_dir}/test_predictions.npy', test_predictions)
-    
-    # Save output variable names
-    with open(f'{results_dir}/output_variables.txt', 'w') as f:
-        for var in output_variables:
-            f.write(f"{var}\n")
     
     # Print metrics
     print(f"\n{dataset_name.capitalize()} Test Metrics for Lead Time {lead_time}:")
@@ -546,16 +368,275 @@ def save_results(dataset_name, lead_time, test_truths, test_predictions, metrics
     print(f"\nResults and metrics saved in '{results_dir}' directory.")
 
 
+
+def train_unet_individual_lead_time(model, train_dataset, val_dataset, criterion, optimizer, 
+                                    lead_time, dataset_name='bias_correction', num_epochs=200, 
+                                    batch_size=32, patience=5, device=None, 
+                                    local_rank=0, world_size=1):
+    """
+    Train a U-Net model for a specific lead time using DDP for multi-GPU training
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Only print from rank 0 to avoid duplicate logs
+    if local_rank == 0:
+        print_memory_stats(local_rank, f"Start of train_unet for lead time {lead_time}")
+        print("We are using ", device)
+        print(f"\n🔹 Training Model for Lead Time = {lead_time} hours")
+    
+    # Create distributed samplers
+    train_sampler = DistributedSampler(
+        train_dataset, 
+        num_replicas=world_size,
+        rank=local_rank,
+        shuffle=True,
+        drop_last=False
+    )
+    
+    # Use DistributedSampler for validation too to ensure proper sharding
+    val_sampler = DistributedSampler(
+        val_dataset,
+        num_replicas=world_size,
+        rank=local_rank,
+        shuffle=False,
+        drop_last=False
+    )
+    
+    # Create data loaders with distributed samplers
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=False,  # Don't shuffle - sampler does it
+        num_workers=4,  
+        sampler=train_sampler,
+        pin_memory=False    # Speeds up GPU transfers
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size, 
+        shuffle=False,
+        num_workers=4,
+        sampler=val_sampler,
+        pin_memory=False
+    )
+    
+    # Wrap model in DDP
+    model.to(device) 
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank) #,find_unused_parameters=True)
+    
+    # Early stopping tracking
+    epochs_no_improve = 0
+    best_val_loss = float('inf')
+    
+    # Track losses
+    train_losses = []
+    val_losses = []
+
+    scaler = torch.cuda.amp.GradScaler()
+    
+    # Train for specified number of epochs
+    for epoch in range(num_epochs):
+        # Set epoch for sampler
+        train_sampler.set_epoch(epoch)
+        
+        # Training phase
+        model.train()
+        train_epoch_loss = 0.0
+        
+        for batch_idx, (batch_inputs, batch_targets) in enumerate(train_loader):
+            batch_inputs = batch_inputs.to(device)
+            batch_targets = batch_targets.to(device)
+            
+            optimizer.zero_grad()
+
+                        # Use mixed precision training
+            with torch.cuda.amp.autocast():
+                outputs = model(batch_inputs)
+                loss = criterion(outputs, batch_targets)
+            
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            
+            # Record batch loss
+            batch_loss = loss.item()
+            
+            # Log every batch but only from rank 0
+            if (batch_idx + 1) % 1 == 0 and local_rank == 0:
+                print(f"  Lead Time {lead_time}, Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)}, "
+                      f"Batch Loss: {batch_loss:.4f}")
+            
+            train_epoch_loss += batch_loss
+
+            del batch_inputs, batch_targets, outputs, loss
+        
+
+        # Validation phase
+        model.eval()
+        val_epoch_loss = 0.0
+        
+        with torch.no_grad():
+            for batch_inputs, batch_targets in val_loader:
+                batch_inputs = batch_inputs.to(device)
+                batch_targets = batch_targets.to(device)
+
+                with torch.cuda.amp.autocast():
+                    outputs = model(batch_inputs)
+                    loss = criterion(outputs, batch_targets)
+                
+                val_epoch_loss += loss.item()
+
+                del batch_inputs, batch_targets, outputs, loss
+        
+        # Average losses for this process
+        avg_train_loss = train_epoch_loss / len(train_loader)
+        avg_val_loss = val_epoch_loss / len(val_loader)
+        
+        # Gather and average losses across all processes
+        train_loss_tensor = torch.tensor([avg_train_loss], device=device)
+        val_loss_tensor = torch.tensor([avg_val_loss], device=device)
+        
+        # Allreduce to get average loss across all processes
+        dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
+        
+        # Divide by world size to get the mean
+        avg_train_loss = train_loss_tensor.item() / world_size
+        avg_val_loss = val_loss_tensor.item() / world_size
+        
+        train_losses.append(avg_train_loss)
+        val_losses.append(avg_val_loss)
+        
+        # Print progress (only from rank 0)
+        if local_rank == 0:
+            print(f"Lead Time {lead_time}, Epoch {epoch+1}/{num_epochs}, "
+                f"Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
+            print_memory_stats(local_rank, f"End of epoch {epoch+1}")
+        
+        # Early stopping logic (only save model from rank 0)
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            epochs_no_improve = 0
+            
+            # Save best model from rank 0 only
+            if local_rank == 0:
+                # Save the model state dict
+                torch.save(model.module.state_dict(), f'checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth')
+        else:
+            epochs_no_improve += 1
+        
+        # Make sure all processes get the same decision on early stopping
+        epochs_no_improve_tensor = torch.tensor([epochs_no_improve], device=device)
+        dist.broadcast(epochs_no_improve_tensor, src=0)
+        epochs_no_improve = epochs_no_improve_tensor.item()
+        
+        # Early stopping condition
+        if epochs_no_improve >= patience:
+            if local_rank == 0:
+                print(f"Early stopping at epoch {epoch+1}")
+            break
+        
+        torch.cuda.empty_cache()
+        gc.collect()
+        # Wait for all processes to finish the epoch
+        dist.barrier(device_ids=[local_rank])
+    
+    return {
+        'lead_time': lead_time,
+        'train_losses': train_losses,
+        'val_losses': val_losses,
+        'best_val_loss': best_val_loss
+    }
+
+def print_memory_stats(rank, location):
+    if rank == 0:
+        gpu_memory_allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+        gpu_memory_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+        print(f"[{location}] GPU Memory: Allocated={gpu_memory_allocated:.2f}GB, Reserved={gpu_memory_reserved:.2f}GB")
+
+
+
+def evaluate_model(model, test_loader, device, target_stats=None):
+    """
+    Evaluate the model on test data and collect predictions
+    
+    Args:
+        model (nn.Module): Trained UNet model
+        test_loader (DataLoader): Test data loader
+        device (torch.device): Device to run evaluation on
+        target_stats (dict, optional): Statistics to denormalize predictions
+    
+    Returns:
+        Tuple of (all_truths, all_predictions)
+    """
+    model.eval()
+    all_truths = []
+    all_predictions = []
+    
+    with torch.no_grad():
+        for batch_inputs, batch_targets in test_loader:
+            batch_inputs = batch_inputs.to(device)
+            batch_targets = batch_targets.cpu().numpy().squeeze(axis=1)
+            
+            # Move model predictions to CPU for numpy conversion
+            outputs = model(batch_inputs).cpu().numpy().squeeze(axis=1)
+            
+            all_truths.append(batch_targets)
+            all_predictions.append(outputs)
+    
+    # Concatenate all batches
+    all_truths = np.concatenate(all_truths, axis=0)
+    all_predictions = np.concatenate(all_predictions, axis=0)
+
+    print ("Evaluation Shape:")
+    print ("Truth: ", all_truths.shape)
+    print ("Predictions: ", all_predictions.shape)
+
+
+    # Denormalize predictions and truths if stats are provided
+    if target_stats is not None:
+        for i, var in enumerate(test_loader.dataset.output_variables):
+            if var in target_stats:
+                mean, std = target_stats[var]['mean'], target_stats[var]['std']
+
+                print(f"Denormalizing {var} with scalar mean={mean}, std={std}")
+
+                all_truths = all_truths * (std + 1e-8) + mean
+                all_predictions = all_predictions * (std + 1e-8) + mean
+
+    return all_truths, all_predictions
+    
+
+
 def main():
+    # Set up SLURM-based distributed training environment
+    os.environ['MASTER_ADDR'] = str(os.environ['HOSTNAME'])
+    os.environ['MASTER_PORT'] = "29500"
+    os.environ['WORLD_SIZE'] = os.environ['SLURM_NTASKS']
+    os.environ['RANK'] = os.environ['SLURM_PROCID']
+
+    world_size = int(os.environ['SLURM_NTASKS'])
+    world_rank = int(os.environ['SLURM_PROCID'])
+    local_rank = int(os.environ['SLURM_LOCALID'])
+     
+    # Set device BEFORE initializing process group
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f'cuda:{local_rank}')
     
-    # Set device for this process
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Initialize the distributed process group with proper device specification
+    dist.init_process_group('nccl', timeout=timedelta(minutes=30), rank=world_rank, world_size=world_size)  
     
-    # Print GPU status
-    if torch.cuda.is_available():
-        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-    else:
-        print(f"No GPU available, using CPU.")
+    # Print GPU status (only from rank 0)
+    print(f"Using local_rank={local_rank}, world_rank={world_rank}")
+    if world_rank == 0:
+        print(f"Initialized distributed training with {world_size} processes")
+        print(f"Using GPU: {torch.cuda.get_device_name(local_rank)}")
+    
+    # Use explicit barrier with device_ids
+    dist.barrier(device_ids=[local_rank])
+
+    print_memory_stats(world_rank, "Before data loading")
 
     seed_everything(0)
 
@@ -572,7 +653,8 @@ def main():
     parser.add_argument("--model", type=str, choices=model_options.keys(), default="unet", help="Choose a model")
     parser.add_argument("--dataset", type=str, default="ResidualUNet", help="Specify the dataset name")
     parser.add_argument("--base_channels", type=int, default=8, help="Number of base channels for the model")
-    parser.add_argument("--batch_size", type=int, default=32, help="batch size for the model")
+    parser.add_argument("--batch_size", type=int, default=4, help="batch size for the model")
+
     args = parser.parse_args()
     
     # Set dataset name
@@ -591,36 +673,36 @@ def main():
     
     # Define hyperparameters
     num_epochs = 200
-    batch_size = args.batch_size
+    batch_size = args.batch_size  # Per-GPU batch size
     patience = 5
     base_channels = args.base_channels
-    
+
     # Model parameters
     in_channels = len(input_variables)
     out_channels = len(output_variables)
 
-    model_options = {
-    "unet": UNet,
-    "residual_unet": ResidualUNet,
-    "attention_unet": AttentionUNet,
-    "unet_plus_plus": UNetPlusPlus,
-    "residual_unet_plus": ResidualUNetPlusPlus
-        }
 
     # Instantiate the selected model
     ModelClass = model_options[args.model]
+   
+    # Create checkpoint directory (only rank 0 needs to do this)
+    if world_rank == 0:
+        os.makedirs('checkpoint', exist_ok=True)
 
     # Create checkpoint directory (only rank 0 needs to do this)
-    os.makedirs('checkpoint', exist_ok=True)
+    if world_rank == 0:
+        os.makedirs('Results', exist_ok=True)
 
     # Create checkpoint directory (only rank 0 needs to do this)
-    os.makedirs('Results', exist_ok=True)
-
-    # Create checkpoint directory (only rank 0 needs to do this)
-    os.makedirs(f'checkpoint/{dataset_name}', exist_ok=True)
+    if world_rank == 0:
+        os.makedirs(f'checkpoint/{dataset_name}', exist_ok=True)
 
      # Create checkpoint directory (only rank 0 needs to do this)
-    os.makedirs(f'Results/{dataset_name}_results', exist_ok=True)
+    if world_rank == 0:
+        os.makedirs(f'Results/{dataset_name}_results', exist_ok=True)
+
+    # Make sure all processes see the directory
+    dist.barrier(device_ids=[local_rank])
     
     # Store training results for each lead time
     all_lead_time_results = {}
@@ -629,12 +711,16 @@ def main():
     lead_time_input_stats = {}
     lead_time_target_stats = {}
     
+    # Pre-load only the necessary data for each lead time
+    if world_rank == 0:
+        print("Pre-loading data and calculating stats for all lead times...")
+    
     
     for lead_time in lead_times:
-
-        print(f"\n{'='*50}")
-        print(f"\nProcessing data for lead time {lead_time}...")
-        print(f"\n{'='*50}")
+        if world_rank == 0:
+            print(f"\n{'='*50}")
+            print(f"\nProcessing data for lead time {lead_time}...")
+            print(f"\n{'='*50}")
         
         # Load data for this lead time only
         train_input_file = f"{input_base_dir}/Train/MPAS_T{lead_time}.npz"
@@ -702,10 +788,12 @@ def main():
                 if var in data:
                     test_target_data[var] = data[var]
 
-        print(f"\n{'='*50}")
-        print(f"Training for Lead Time: {lead_time} hours")
-        print(f"{'='*50}")
+        if world_rank == 0:
+            print(f"\n{'='*50}")
+            print(f"Training for Lead Time: {lead_time} hours")
+            print(f"{'='*50}")
  
+
         # Create training dataset for the current lead time using pre-loaded data
         train_dataset = BiasCorrectionDataset(
             lead_time=lead_time, 
@@ -727,17 +815,26 @@ def main():
             input_stats=input_stats,  # Use same normalization stats as training
             target_stats=target_stats
         )
+
+        # Clear memory after dataset creation
+        del train_input_data, train_target_data, test_input_data, test_target_data
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        print_memory_stats(world_rank, f"After data loading for lead time {lead_time}")
         
-        # Initialize a new model for each lead time
-        model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
+        # Initialize a new model for each lead time - no DDP yet
+        #model = UNet(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
         # model.load_state_dict(torch.load(f'checkpoint/{dataset_name}_lead_time_{lead_time}_best.pth'))
+        model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
+        # print(f"Using model: {args.model}")
         model = model.to(device)
         
         # Loss and Optimizer
         criterion = nn.MSELoss()  # Mean Squared Error Loss
-        optimizer = optim.Adam(model.parameters(), lr=5e-4)
+        optimizer = optim.AdamW(model.parameters(), lr=5e-4)
         
-        # Train model for this lead time
+        # Train model for this lead time with DDP
         lead_time_result = train_unet_individual_lead_time(
             model,
             train_dataset,
@@ -749,19 +846,43 @@ def main():
             num_epochs=num_epochs,
             batch_size=batch_size,
             patience=patience,
-            device=device
+            device=device,
+            local_rank=local_rank,
+            world_size=world_size
         )
         
         # Store results
         all_lead_time_results[lead_time] = lead_time_result
+
+        # Force cleanup
+        del model, optimizer, criterion, train_dataset, val_dataset
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # Wait for all processes before continuing to next lead time
+        dist.barrier(device_ids=[local_rank])
         
-        # Load the best model for this lead time
-        best_model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
-        best_model.load_state_dict(torch.load(f'checkpoint/{dataset_name}_lead_time_{lead_time}_best.pth'))
-        best_model = best_model.to(device)
-        
-        # Create test dataset using the full test data
-        test_dataset = BiasCorrectionDataset(
+        # Only evaluate on rank 0 to avoid duplicate work
+        if world_rank == 0:
+            # Load the best model for this lead time
+            best_model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
+            best_model.load_state_dict(torch.load(f'checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth'))
+            best_model = best_model.to(device)
+            
+            # Reload test dataset
+            test_input_data = {}
+            with np.load(test_input_file) as data:
+                for var in input_variables:
+                    if var in data:
+                        test_input_data[var] = data[var]
+            
+            test_target_data = {}
+            with np.load(test_target_file) as data:
+                for var in output_variables:
+                    if var in data:
+                        test_target_data[var] = data[var]
+
+            test_dataset = BiasCorrectionDataset(
                 lead_time=lead_time,
                 input_variables=input_variables,
                 output_variables=output_variables,
@@ -770,35 +891,50 @@ def main():
                 input_stats=input_stats,
                 target_stats=target_stats
             )
-        
-        test_loader = DataLoader(
-            test_dataset, 
-            batch_size=batch_size, 
-            shuffle=False,
-            num_workers=4
-        )
-        
-        # Evaluate model on test data (with denormalization)
-        test_truths, test_predictions = evaluate_model(
-            best_model, 
-            test_loader, 
-            device,
-            target_stats=target_stats  # Pass stats for denormalization
-        )
-        
-        # Calculate metrics
-        metrics = calculate_metrics(test_truths, test_predictions)
-        
-        # Save results with output variable information
-        save_results(dataset_name, lead_time, test_truths, test_predictions, metrics, 
-                    output_variables)
+            
+            test_loader = DataLoader(
+                test_dataset, 
+                batch_size=batch_size, 
+                shuffle=False,
+                num_workers=4
+            )
+            
+            # Evaluate model on test data (with denormalization)
+            test_truths, test_predictions = evaluate_model(
+                best_model, 
+                test_loader, 
+                device,
+                target_stats=target_stats  # Pass stats for denormalization
+            )
+            
+            # Calculate metrics (using your external function)
+            metrics = calculate_metrics(test_truths, test_predictions)
+            
+            # Save results with output variable information (using your external function)
+            save_results(dataset_name, lead_time, test_truths, test_predictions, metrics, 
+                        output_variables)
+
+            # Clean up
+            del best_model, test_dataset, test_input_data, test_target_data
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            print(f"Completed training and evaluation for lead time {lead_time}")
     
-    print("\nIndividual Lead Time Training and Evaluation Complete!")
-    print(f"Trained {len(lead_times)} separate models, one for each lead time.")
+    # Final synchronization
+    dist.barrier(device_ids=[local_rank])
+    
+    if world_rank == 0:
+        print("\nIndividual Lead Time Training and Evaluation Complete!")
+        print(f"Trained {len(lead_times)} separate models, one for each lead time.")
+    
+    # Clean up distributed process group
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
     main()
+
 
 
 
