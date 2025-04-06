@@ -54,6 +54,12 @@ export PYTHONPATH=$PWD/../src:$PYTHONPATH
 
 
 #time srun -n $((SLURM_JOB_NUM_NODES*8)) \
+
+#NUM_TASKS=$((SLURM_JOB_NUM_NODES*8))
+#NUM_TASKS=8
+
+#time srun --ntasks-per-node=8 -n ${NUM_TASKS} \
+
 time srun --ntasks-per-node=8 -n $((SLURM_JOB_NUM_NODES*8)) \
 	python Train_individual_ddp.py --base_channels 16 --batch_size 4 --model residual_unet_plus --dataset ResidualUNetPlusPlus
 	#python Train_individual_ddp.py --base_channels 16 --batch_size 16 --model residual_unet_plus --dataset ResidualUNetPlusPlus

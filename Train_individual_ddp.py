@@ -20,7 +20,16 @@ from model_hub.Attention_Unet import AttentionUNet
 from model_hub.UnetPlus import UNetPlusPlus
 from model_hub.Residual_UnetPlus import ResidualUNetPlusPlus
 import argparse
+import time
+import logging
 
+logging.basicConfig(
+    level=logging.DEBUG
+)
+logger = None
+
+def event(mark):
+    logger.debug(f"{time.perf_counter()}:{mark}")
 
 def seed_everything(seed):
     random.seed(seed)
@@ -356,16 +365,16 @@ def save_results(dataset_name, lead_time, test_truths, test_predictions, metrics
     np.save(f'{results_dir}/test_predictions.npy', test_predictions)
     
     # Print metrics
-    print(f"\n{dataset_name.capitalize()} Test Metrics for Lead Time {lead_time}:")
+    logger.info(f"\n{dataset_name.capitalize()} Test Metrics for Lead Time {lead_time}:")
     for metric, value in metrics.items():
-        print(f"{metric}: {value}")
+        logger.info(f"{metric}: {value}")
     
     # Save metrics to text file
     with open(f'{results_dir}/test_metrics.txt', 'w') as f:
         for metric, value in metrics.items():
             f.write(f"{metric}: {value}\n")
     
-    print(f"\nResults and metrics saved in '{results_dir}' directory.")
+    logger.info(f"\nResults and metrics saved in '{results_dir}' directory.")
 
 
 
@@ -382,8 +391,8 @@ def train_unet_individual_lead_time(model, train_dataset, val_dataset, criterion
     # Only print from rank 0 to avoid duplicate logs
     if local_rank == 0:
         print_memory_stats(local_rank, f"Start of train_unet for lead time {lead_time}")
-        print("We are using ", device)
-        print(f"\n🔹 Training Model for Lead Time = {lead_time} hours")
+        logger.info("We are using ", device)
+        logger.info(f"\n🔹 Training Model for Lead Time = {lead_time} hours")
     
     # Create distributed samplers
     train_sampler = DistributedSampler(
@@ -464,13 +473,16 @@ def train_unet_individual_lead_time(model, train_dataset, val_dataset, criterion
             
             # Log every batch but only from rank 0
             if (batch_idx + 1) % 1 == 0 and local_rank == 0:
-                print(f"  Lead Time {lead_time}, Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)}, "
+                logger.info(f"  Lead Time {lead_time}, Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)}, "
                       f"Batch Loss: {batch_loss:.4f}")
-            
+
             train_epoch_loss += batch_loss
 
             del batch_inputs, batch_targets, outputs, loss
-        
+             
+            for handler in logger.handlers:
+                handler.flush()
+       
 
         # Validation phase
         model.eval()
@@ -510,7 +522,7 @@ def train_unet_individual_lead_time(model, train_dataset, val_dataset, criterion
         
         # Print progress (only from rank 0)
         if local_rank == 0:
-            print(f"Lead Time {lead_time}, Epoch {epoch+1}/{num_epochs}, "
+            logger.info(f"Lead Time {lead_time}, Epoch {epoch+1}/{num_epochs}, "
                 f"Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
             print_memory_stats(local_rank, f"End of epoch {epoch+1}")
         
@@ -534,7 +546,7 @@ def train_unet_individual_lead_time(model, train_dataset, val_dataset, criterion
         # Early stopping condition
         if epochs_no_improve >= patience:
             if local_rank == 0:
-                print(f"Early stopping at epoch {epoch+1}")
+                logger.info(f"Early stopping at epoch {epoch+1}")
             break
         
         torch.cuda.empty_cache()
@@ -553,7 +565,7 @@ def print_memory_stats(rank, location):
     if rank == 0:
         gpu_memory_allocated = torch.cuda.memory_allocated() / (1024 ** 3)
         gpu_memory_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
-        print(f"[{location}] GPU Memory: Allocated={gpu_memory_allocated:.2f}GB, Reserved={gpu_memory_reserved:.2f}GB")
+        logger.info(f"[{location}] GPU Memory: Allocated={gpu_memory_allocated:.2f}GB, Reserved={gpu_memory_reserved:.2f}GB")
 
 
 
@@ -600,7 +612,7 @@ def evaluate_model(model, test_loader, device, target_stats=None):
             if var in target_stats:
                 mean, std = target_stats[var]['mean'], target_stats[var]['std']
 
-                print(f"Denormalizing {var} with scalar mean={mean}, std={std}")
+                logger.info(f"Denormalizing {var} with scalar mean={mean}, std={std}")
 
                 all_truths = all_truths * (std + 1e-8) + mean
                 all_predictions = all_predictions * (std + 1e-8) + mean
@@ -610,6 +622,9 @@ def evaluate_model(model, test_loader, device, target_stats=None):
 
 
 def main():
+
+    global logger
+
     # Set up SLURM-based distributed training environment
     os.environ['MASTER_ADDR'] = str(os.environ['HOSTNAME'])
     os.environ['MASTER_PORT'] = "29500"
@@ -620,6 +635,14 @@ def main():
     world_rank = int(os.environ['SLURM_PROCID'])
     local_rank = int(os.environ['SLURM_LOCALID'])
      
+
+    logger = logging.getLogger("mylogger")
+    file_handler = logging.FileHandler(f"train_rank{world_rank}.log")
+    #file_handler.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    
+    event("TRAINING BEGIN")
+
     # Set device BEFORE initializing process group
     torch.cuda.set_device(local_rank)
     device = torch.device(f'cuda:{local_rank}')
@@ -628,13 +651,15 @@ def main():
     dist.init_process_group('nccl', timeout=timedelta(minutes=30), rank=world_rank, world_size=world_size)  
     
     # Print GPU status (only from rank 0)
-    print(f"Using local_rank={local_rank}, world_rank={world_rank}")
+    logger.info(f"Using local_rank={local_rank}, world_rank={world_rank}")
     if world_rank == 0:
-        print(f"Initialized distributed training with {world_size} processes")
-        print(f"Using GPU: {torch.cuda.get_device_name(local_rank)}")
-    
+        logger.info(f"Initialized distributed training with {world_size} processes")
+        logger.info(f"Using GPU: {torch.cuda.get_device_name(local_rank)}")
+
     # Use explicit barrier with device_ids
     dist.barrier(device_ids=[local_rank])
+
+    event("DIST INITIALIZED")
 
     print_memory_stats(world_rank, "Before data loading")
 
@@ -665,14 +690,16 @@ def main():
     target_base_dir = "/lustre/orion/atm112/proj-shared/patrickfan/ERA5_data/"
     
     # Define lead times
-    lead_times = [6, 12, 18, 24, 30, 36, 42, 48]
+    #lead_times = [6, 12, 18, 24, 30, 36, 42, 48]
+    lead_times = [6] # for timing
     
     # Define input and output variables
     input_variables = ['mslp', 'u10', 'v10', 't2m', 'q2', 'd2m']
     output_variables = ['t2m']
     
     # Define hyperparameters
-    num_epochs = 200
+    #num_epochs = 200
+    num_epochs = 1 # for timing
     batch_size = args.batch_size  # Per-GPU batch size
     patience = 5
     base_channels = args.base_channels
@@ -704,6 +731,8 @@ def main():
     # Make sure all processes see the directory
     dist.barrier(device_ids=[local_rank])
     
+    event("ARGS PROCESSED")
+
     # Store training results for each lead time
     all_lead_time_results = {}
     
@@ -713,14 +742,16 @@ def main():
     
     # Pre-load only the necessary data for each lead time
     if world_rank == 0:
-        print("Pre-loading data and calculating stats for all lead times...")
+        logger.info("Pre-loading data and calculating stats for all lead times...")
     
     
+    event("STARTED LEADTIME")
     for lead_time in lead_times:
+
         if world_rank == 0:
-            print(f"\n{'='*50}")
-            print(f"\nProcessing data for lead time {lead_time}...")
-            print(f"\n{'='*50}")
+            logger.info(f"\n{'='*50}")
+            logger.info(f"\nProcessing data for lead time {lead_time}...")
+            logger.info(f"\n{'='*50}")
         
         # Load data for this lead time only
         train_input_file = f"{input_base_dir}/Train/MPAS_T{lead_time}.npz"
@@ -789,10 +820,12 @@ def main():
                     test_target_data[var] = data[var]
 
         if world_rank == 0:
-            print(f"\n{'='*50}")
-            print(f"Training for Lead Time: {lead_time} hours")
-            print(f"{'='*50}")
+            logger.info(f"\n{'='*50}")
+            logger.info(f"Training for Lead Time: {lead_time} hours")
+            logger.info(f"{'='*50}")
  
+
+        event("FINISH READING INPUT DATA")
 
         # Create training dataset for the current lead time using pre-loaded data
         train_dataset = BiasCorrectionDataset(
@@ -823,13 +856,17 @@ def main():
 
         print_memory_stats(world_rank, f"After data loading for lead time {lead_time}")
         
+        event("DATASET IS PREPARED")
+
         # Initialize a new model for each lead time - no DDP yet
         #model = UNet(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
         # model.load_state_dict(torch.load(f'checkpoint/{dataset_name}_lead_time_{lead_time}_best.pth'))
         model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
-        # print(f"Using model: {args.model}")
+        # logger.info(f"Using model: {args.model}")
         model = model.to(device)
         
+        event("MODEL IS ON DEVICE")
+
         # Loss and Optimizer
         criterion = nn.MSELoss()  # Mean Squared Error Loss
         optimizer = optim.AdamW(model.parameters(), lr=5e-4)
@@ -854,6 +891,8 @@ def main():
         # Store results
         all_lead_time_results[lead_time] = lead_time_result
 
+        event("LEADTIME RESULT SAVED")
+
         # Force cleanup
         del model, optimizer, criterion, train_dataset, val_dataset
         gc.collect()
@@ -861,9 +900,12 @@ def main():
 
         # Wait for all processes before continuing to next lead time
         dist.barrier(device_ids=[local_rank])
-        
+ 
+        event("FORCED CLEANUP")
+       
         # Only evaluate on rank 0 to avoid duplicate work
         if world_rank == 0:
+            event("BEGIN EVAL")
             # Load the best model for this lead time
             best_model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
             best_model.load_state_dict(torch.load(f'checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth'))
@@ -919,18 +961,22 @@ def main():
             gc.collect()
             torch.cuda.empty_cache()
 
-            print(f"Completed training and evaluation for lead time {lead_time}")
+            logger.info(f"Completed training and evaluation for lead time {lead_time}")
+            event("FINISH EVAL")
     
     # Final synchronization
     dist.barrier(device_ids=[local_rank])
     
+    event("FINISHED LEADTIME")
+
     if world_rank == 0:
-        print("\nIndividual Lead Time Training and Evaluation Complete!")
-        print(f"Trained {len(lead_times)} separate models, one for each lead time.")
+        logger.info("\nIndividual Lead Time Training and Evaluation Complete!")
+        logger.info(f"Trained {len(lead_times)} separate models, one for each lead time.")
     
     # Clean up distributed process group
     dist.destroy_process_group()
 
+    event("TRAINING END")
 
 if __name__ == "__main__":
     main()
