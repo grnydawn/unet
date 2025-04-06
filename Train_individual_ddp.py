@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = None
 
 def event(mark):
-    logger.debug(f"{time.perf_counter()}:{mark}")
+    logger.debug(f"{time.time()}:{mark}")
 
 def seed_everything(seed):
     random.seed(seed)
@@ -353,11 +353,11 @@ def calculate_metrics(truths, predictions, return_p_value=False):
     return metrics
 
 
-def save_results(dataset_name, lead_time, test_truths, test_predictions, metrics, 
+def save_results(outdir, dataset_name, lead_time, test_truths, test_predictions, metrics, 
                 output_variables):
 
     # Create results directory with dataset name and lead time
-    results_dir = f'Results/{dataset_name}_results/lead_time_{lead_time}'
+    results_dir = f'{outdir}/Results/{dataset_name}_results/lead_time_{lead_time}'
     os.makedirs(results_dir, exist_ok=True)
     
     # Save numpy arrays
@@ -378,7 +378,7 @@ def save_results(dataset_name, lead_time, test_truths, test_predictions, metrics
 
 
 
-def train_unet_individual_lead_time(model, train_dataset, val_dataset, criterion, optimizer, 
+def train_unet_individual_lead_time(outdir, model, train_dataset, val_dataset, criterion, optimizer, 
                                     lead_time, dataset_name='bias_correction', num_epochs=200, 
                                     batch_size=32, patience=5, device=None, 
                                     local_rank=0, world_size=1):
@@ -444,6 +444,8 @@ def train_unet_individual_lead_time(model, train_dataset, val_dataset, criterion
 
     scaler = torch.cuda.amp.GradScaler()
     
+    event("BEGIN EPOCH")
+
     # Train for specified number of epochs
     for epoch in range(num_epochs):
         # Set epoch for sampler
@@ -483,6 +485,7 @@ def train_unet_individual_lead_time(model, train_dataset, val_dataset, criterion
             for handler in logger.handlers:
                 handler.flush()
        
+        event("TRAIN MODEL")
 
         # Validation phase
         model.eval()
@@ -501,6 +504,8 @@ def train_unet_individual_lead_time(model, train_dataset, val_dataset, criterion
 
                 del batch_inputs, batch_targets, outputs, loss
         
+        event("VALIDATE MODEL")
+
         # Average losses for this process
         avg_train_loss = train_epoch_loss / len(train_loader)
         avg_val_loss = val_epoch_loss / len(val_loader)
@@ -534,7 +539,7 @@ def train_unet_individual_lead_time(model, train_dataset, val_dataset, criterion
             # Save best model from rank 0 only
             if local_rank == 0:
                 # Save the model state dict
-                torch.save(model.module.state_dict(), f'checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth')
+                torch.save(model.module.state_dict(), f'{outdir}/checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth')
         else:
             epochs_no_improve += 1
         
@@ -551,8 +556,11 @@ def train_unet_individual_lead_time(model, train_dataset, val_dataset, criterion
         
         torch.cuda.empty_cache()
         gc.collect()
+
+        event("CALC AVG LOSS")
         # Wait for all processes to finish the epoch
         dist.barrier(device_ids=[local_rank])
+        event("BARRIER - CALC AVG LOSS")
     
     return {
         'lead_time': lead_time,
@@ -605,6 +613,7 @@ def evaluate_model(model, test_loader, device, target_stats=None):
     print ("Truth: ", all_truths.shape)
     print ("Predictions: ", all_predictions.shape)
 
+    event("EVAL PREDICT")
 
     # Denormalize predictions and truths if stats are provided
     if target_stats is not None:
@@ -616,6 +625,8 @@ def evaluate_model(model, test_loader, device, target_stats=None):
 
                 all_truths = all_truths * (std + 1e-8) + mean
                 all_predictions = all_predictions * (std + 1e-8) + mean
+
+    event("EVAL DENORMALIZE")
 
     return all_truths, all_predictions
     
@@ -637,7 +648,8 @@ def main():
      
 
     logger = logging.getLogger("mylogger")
-    file_handler = logging.FileHandler(f"train_rank{world_rank}.log")
+
+    file_handler = logging.FileHandler(f"logs/train_rank{world_rank}_{world_size}.log")
     #file_handler.setLevel(logging.INFO)
     logger.addHandler(file_handler)
     
@@ -656,10 +668,11 @@ def main():
         logger.info(f"Initialized distributed training with {world_size} processes")
         logger.info(f"Using GPU: {torch.cuda.get_device_name(local_rank)}")
 
+    event("INIT DIST")
+
     # Use explicit barrier with device_ids
     dist.barrier(device_ids=[local_rank])
-
-    event("DIST INITIALIZED")
+    event("BARRIER - INIT DIST")
 
     print_memory_stats(world_rank, "Before data loading")
 
@@ -679,6 +692,7 @@ def main():
     parser.add_argument("--dataset", type=str, default="ResidualUNet", help="Specify the dataset name")
     parser.add_argument("--base_channels", type=int, default=8, help="Number of base channels for the model")
     parser.add_argument("--batch_size", type=int, default=4, help="batch size for the model")
+    parser.add_argument("--outdir", type=str, default=".", help="output directory")
 
     args = parser.parse_args()
     
@@ -688,7 +702,10 @@ def main():
     # Define base directories
     input_base_dir = "/lustre/orion/atm112/proj-shared/patrickfan/MPAS_data/"
     target_base_dir = "/lustre/orion/atm112/proj-shared/patrickfan/ERA5_data/"
-    
+
+    # Output directory
+    outdir = args.outdir
+   
     # Define lead times
     #lead_times = [6, 12, 18, 24, 30, 36, 42, 48]
     lead_times = [6] # for timing
@@ -714,25 +731,23 @@ def main():
    
     # Create checkpoint directory (only rank 0 needs to do this)
     if world_rank == 0:
-        os.makedirs('checkpoint', exist_ok=True)
+        os.makedirs(f'{outdir}/checkpoint', exist_ok=True)
 
     # Create checkpoint directory (only rank 0 needs to do this)
     if world_rank == 0:
-        os.makedirs('Results', exist_ok=True)
+        os.makedirs(f'{outdir}/Results', exist_ok=True)
 
     # Create checkpoint directory (only rank 0 needs to do this)
     if world_rank == 0:
-        os.makedirs(f'checkpoint/{dataset_name}', exist_ok=True)
+        os.makedirs(f'{outdir}/checkpoint/{dataset_name}', exist_ok=True)
 
      # Create checkpoint directory (only rank 0 needs to do this)
     if world_rank == 0:
-        os.makedirs(f'Results/{dataset_name}_results', exist_ok=True)
+        os.makedirs(f'{outdir}/Results/{dataset_name}_results', exist_ok=True)
 
     # Make sure all processes see the directory
     dist.barrier(device_ids=[local_rank])
     
-    event("ARGS PROCESSED")
-
     # Store training results for each lead time
     all_lead_time_results = {}
     
@@ -744,8 +759,7 @@ def main():
     if world_rank == 0:
         logger.info("Pre-loading data and calculating stats for all lead times...")
     
-    
-    event("STARTED LEADTIME")
+    event("BEGIN LEADTIME")
     for lead_time in lead_times:
 
         if world_rank == 0:
@@ -771,6 +785,8 @@ def main():
             for var in output_variables:
                 if var in data:
                     train_target_data[var] = data[var]
+
+        event("LOAD TRAIN DATA")
 
         input_stats = {}
         for var in input_variables:
@@ -805,6 +821,7 @@ def main():
                 
                 target_stats[var] = {'mean': mean, 'std': std}
 
+        event("CALC STATS")
 
         # Load test data
         test_input_data = {}
@@ -819,13 +836,13 @@ def main():
                 if var in data:
                     test_target_data[var] = data[var]
 
+        event("LOAD TEST DATA")
+
         if world_rank == 0:
             logger.info(f"\n{'='*50}")
             logger.info(f"Training for Lead Time: {lead_time} hours")
             logger.info(f"{'='*50}")
  
-
-        event("FINISH READING INPUT DATA")
 
         # Create training dataset for the current lead time using pre-loaded data
         train_dataset = BiasCorrectionDataset(
@@ -849,14 +866,14 @@ def main():
             target_stats=target_stats
         )
 
+        event("CREATE DATASETS")
+
         # Clear memory after dataset creation
         del train_input_data, train_target_data, test_input_data, test_target_data
         gc.collect()
         torch.cuda.empty_cache()
 
         print_memory_stats(world_rank, f"After data loading for lead time {lead_time}")
-        
-        event("DATASET IS PREPARED")
 
         # Initialize a new model for each lead time - no DDP yet
         #model = UNet(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
@@ -873,6 +890,7 @@ def main():
         
         # Train model for this lead time with DDP
         lead_time_result = train_unet_individual_lead_time(
+            outdir,
             model,
             train_dataset,
             val_dataset,
@@ -898,17 +916,18 @@ def main():
         gc.collect()
         torch.cuda.empty_cache()
 
+        event("FORCE CLEANUP")
+
         # Wait for all processes before continuing to next lead time
         dist.barrier(device_ids=[local_rank])
  
-        event("FORCED CLEANUP")
+        event("BARRIER - FORCE CLEANUP")
        
         # Only evaluate on rank 0 to avoid duplicate work
         if world_rank == 0:
-            event("BEGIN EVAL")
             # Load the best model for this lead time
             best_model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
-            best_model.load_state_dict(torch.load(f'checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth'))
+            best_model.load_state_dict(torch.load(f'{outdir}/checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth'))
             best_model = best_model.to(device)
             
             # Reload test dataset
@@ -941,6 +960,8 @@ def main():
                 num_workers=4
             )
             
+            event("LOAD EVAL DATA")
+
             # Evaluate model on test data (with denormalization)
             test_truths, test_predictions = evaluate_model(
                 best_model, 
@@ -953,7 +974,7 @@ def main():
             metrics = calculate_metrics(test_truths, test_predictions)
             
             # Save results with output variable information (using your external function)
-            save_results(dataset_name, lead_time, test_truths, test_predictions, metrics, 
+            save_results(outdir, dataset_name, lead_time, test_truths, test_predictions, metrics, 
                         output_variables)
 
             # Clean up
@@ -962,13 +983,14 @@ def main():
             torch.cuda.empty_cache()
 
             logger.info(f"Completed training and evaluation for lead time {lead_time}")
-            event("FINISH EVAL")
-    
-    # Final synchronization
-    dist.barrier(device_ids=[local_rank])
+        event("FINISH EVAL")
     
     event("FINISHED LEADTIME")
 
+    # Final synchronization
+    dist.barrier(device_ids=[local_rank])
+    event("BARRIER - FINISHED LEADTIME")
+    
     if world_rank == 0:
         logger.info("\nIndividual Lead Time Training and Evaluation Complete!")
         logger.info(f"Trained {len(lead_times)} separate models, one for each lead time.")

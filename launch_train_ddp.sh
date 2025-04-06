@@ -55,13 +55,27 @@ export PYTHONPATH=$PWD/../src:$PYTHONPATH
 
 #time srun -n $((SLURM_JOB_NUM_NODES*8)) \
 
-#NUM_TASKS=$((SLURM_JOB_NUM_NODES*8))
-#NUM_TASKS=8
+#NUM_NODES="${SLURM_JOB_NUM_NODES}"
+#NUM_NODES=3
+for NUM_NODES in 2 1
+do
 
-#time srun --ntasks-per-node=8 -n ${NUM_TASKS} \
+NUM_TASKS=$((NUM_NODES*8))
 
-time srun --ntasks-per-node=8 -n $((SLURM_JOB_NUM_NODES*8)) \
-	python Train_individual_ddp.py --base_channels 16 --batch_size 4 --model residual_unet_plus --dataset ResidualUNetPlusPlus
+#time srun --ntasks-per-node=8 -n $((SLURM_JOB_NUM_NODES*8)) \
+
+time srun -N ${NUM_NODES} --ntasks-per-node=8 -n ${NUM_TASKS} \
+	python Train_individual_ddp.py \
+		--base_channels 16 \
+		--batch_size 4 \
+		--model residual_unet_plus \
+		--dataset ResidualUNetPlusPlus \
+		--outdir "/lustre/orion/cli115/scratch/grnydawn/unet_${NUM_NODES}"
+
+#		--outdir "/lustre/orion/cli115/scratch/grnydawn/unet_${SLURM_JOB_NUM_NODES}"
 	#python Train_individual_ddp.py --base_channels 16 --batch_size 16 --model residual_unet_plus --dataset ResidualUNetPlusPlus
 
+mkdir -p logs/${NUM_NODES}
+mv logs/train* logs/${NUM_NODES}
 
+done
