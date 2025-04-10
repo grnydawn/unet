@@ -98,8 +98,14 @@ def plot_timeline(data, stop_time, num_nodes):
 
     # Build legend
     for text, color in color_map.items():
-        if len(eventtime_map[text]) < 1 or statistics.mean(eventtime_map[text]) < 2:
+        if len(eventtime_map[text]) < 1:
             continue
+
+        event_mean = statistics.mean(eventtime_map[text])
+        print(f"{text} , {event_mean}")
+        if event_mean < 2:
+            continue
+
         patch = mpatches.Patch(color=color, label=text)
         legend_handles.append(patch)
 
