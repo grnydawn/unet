@@ -378,7 +378,7 @@ def save_results(outdir, world_rank, dataset_name, lead_time, test_truths, test_
 
 
 
-def train_unet_individual_lead_time(outdir, model, subgroup, train_dataset, val_dataset, criterion, optimizer, 
+def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_ranks, train_dataset, val_dataset, criterion, optimizer, 
                                     lead_time, dataset_name='bias_correction', num_epochs=200, 
                                     batch_size=32, patience=5, device=None,
                                     local_rank=0, world_size=1):
@@ -539,7 +539,8 @@ def train_unet_individual_lead_time(outdir, model, subgroup, train_dataset, val_
             epochs_no_improve = 0
             
             # Save best model from rank 0 only
-            if local_rank == 0:
+            #if local_rank == 0:
+            if world_rank == min(group_ranks):
                 # Save the model state dict
                 torch.save(model.module.state_dict(), f'{outdir}/checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth')
         else:
@@ -916,6 +917,8 @@ def main():
         outdir,
         model,
         subgroup,
+        world_rank,
+        group_ranks,
         train_dataset,
         val_dataset,
         criterion,
