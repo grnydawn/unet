@@ -353,11 +353,11 @@ def calculate_metrics(truths, predictions, return_p_value=False):
     return metrics
 
 
-def save_results(outdir, world_rank, dataset_name, lead_time, test_truths, test_predictions, metrics, 
+def save_results(outdir, dataset_name, lead_time, test_truths, test_predictions, metrics, 
                 output_variables):
 
     # Create results directory with dataset name and lead time
-    results_dir = f'{outdir}/Results/{dataset_name}_results/lead_time_{lead_time}_rank_{world_rank}'
+    results_dir = f'{outdir}/Results/{dataset_name}_results/lead_time_{lead_time}'
     os.makedirs(results_dir, exist_ok=True)
     
     # Save numpy arrays
@@ -378,9 +378,9 @@ def save_results(outdir, world_rank, dataset_name, lead_time, test_truths, test_
 
 
 
-def train_unet_individual_lead_time(outdir, model, subgroup, train_dataset, val_dataset, criterion, optimizer, 
+def train_unet_individual_lead_time(outdir, model, train_dataset, val_dataset, criterion, optimizer, 
                                     lead_time, dataset_name='bias_correction', num_epochs=200, 
-                                    batch_size=32, patience=5, device=None,
+                                    batch_size=32, patience=5, device=None, 
                                     local_rank=0, world_size=1):
     """
     Train a U-Net model for a specific lead time using DDP for multi-GPU training
@@ -391,7 +391,7 @@ def train_unet_individual_lead_time(outdir, model, subgroup, train_dataset, val_
     # Only print from rank 0 to avoid duplicate logs
     if local_rank == 0:
         print_memory_stats(local_rank, f"Start of train_unet for lead time {lead_time}")
-        #logger.info("We are using ", device)
+        logger.info("We are using ", device)
         logger.info(f"\n🔹 Training Model for Lead Time = {lead_time} hours")
     
     # Create distributed samplers
@@ -432,9 +432,7 @@ def train_unet_individual_lead_time(outdir, model, subgroup, train_dataset, val_
     
     # Wrap model in DDP
     model.to(device) 
-
-    #ddp_model = DDP(model, device_ids=[local_rank], process_group=subgroup)
-    model = DDP(model, device_ids=[local_rank], process_group=subgroup, output_device=local_rank) #,find_unused_parameters=True)
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank) #,find_unused_parameters=True)
     
     # Early stopping tracking
     epochs_no_improve = 0
@@ -639,43 +637,31 @@ def main():
     global logger
 
     # Set up SLURM-based distributed training environment
-    os.environ['MASTER_ADDR'] = str(os.environ['MASTER_ADDR'])
-    os.environ['MASTER_PORT'] = str(os.environ['MASTER_PORT'])
+    os.environ['MASTER_ADDR'] = str(os.environ['HOSTNAME'])
+    os.environ['MASTER_PORT'] = "29500"
     os.environ['WORLD_SIZE'] = os.environ['SLURM_NTASKS']
     os.environ['RANK'] = os.environ['SLURM_PROCID']
 
-    world_size = int(os.environ['WORLD_SIZE'])
-    world_rank = int(os.environ['RANK'])
+    world_size = int(os.environ['SLURM_NTASKS'])
+    world_rank = int(os.environ['SLURM_PROCID'])
     local_rank = int(os.environ['SLURM_LOCALID'])
      
-    jobid = os.environ['SLURM_JOB_ID']
 
-    logger = logging.getLogger(f"mylogger_{world_rank}")
+    logger = logging.getLogger("mylogger")
 
-    file_handler = logging.FileHandler(f"logs/{jobid}_train_rank{world_rank}_{world_size}.log")
+    file_handler = logging.FileHandler(f"logs/train_rank{world_rank}_{world_size}.log")
     #file_handler.setLevel(logging.INFO)
     logger.addHandler(file_handler)
     
     event("TRAINING BEGIN")
 
     # Set device BEFORE initializing process group
-    #torch.cuda.set_device(local_rank)
-    #device = torch.device(f'cuda:{local_rank}')
-
-    # Set the device for each rank
-    num_gpus = torch.cuda.device_count()
-    torch.cuda.set_device(local_rank % num_gpus)
+    torch.cuda.set_device(local_rank)
     device = torch.device(f'cuda:{local_rank}')
-
+    
     # Initialize the distributed process group with proper device specification
-    #dist.init_process_group('nccl', timeout=timedelta(minutes=30), rank=world_rank, world_size=world_size)  
-    # Initialize default process group
-    dist.init_process_group(
-        backend="nccl",
-        init_method="env://",
-        timeout=timedelta(seconds=120)
-    )
-
+    dist.init_process_group('nccl', timeout=timedelta(minutes=30), rank=world_rank, world_size=world_size)  
+    
     # Print GPU status (only from rank 0)
     logger.info(f"Using local_rank={local_rank}, world_rank={world_rank}")
     if world_rank == 0:
@@ -721,7 +707,8 @@ def main():
     outdir = args.outdir
    
     # Define lead times
-    lead_times = [6, 12, 18, 24, 30, 36, 42, 48]
+    #lead_times = [6, 12, 18, 24, 30, 36, 42, 48]
+    lead_times = [6] # for timing
     
     # Define input and output variables
     input_variables = ['mslp', 'u10', 'v10', 't2m', 'q2', 'd2m']
@@ -772,189 +759,71 @@ def main():
     if world_rank == 0:
         logger.info("Pre-loading data and calculating stats for all lead times...")
     
-    # Setup subgroups
-    num_subgroups = len(lead_times)
-    ranks_per_group = world_size // num_subgroups
-    group_id = world_rank // ranks_per_group
-    lead_time = lead_times[group_id]
-    group_ranks = list(range(group_id * ranks_per_group, (group_id + 1) * ranks_per_group))
-    subgroup = dist.new_group(
-        ranks=group_ranks,
-        use_local_synchronization=True,
-        backend="nccl"
-    )
-
     event("BEGIN LEADTIME")
-    if world_rank == 0:
-        logger.info(f"\n{'='*50}")
-        logger.info(f"\nProcessing data for lead time {lead_time}...")
-        logger.info(f"\n{'='*50}")
-    
-    # Load data for this lead time only
-    train_input_file = f"{input_base_dir}/Train/MPAS_T{lead_time}.npz"
-    train_target_file = f"{target_base_dir}/Train/ERA5_T{lead_time}.npz"
-    test_input_file = f"{input_base_dir}/Test/MPAS_T{lead_time}.npz"
-    test_target_file = f"{target_base_dir}/Test/ERA5_T{lead_time}.npz"
-    
-    # Load training data
-    train_input_data = {}
-    with np.load(train_input_file) as data:
-        for var in input_variables:
-            if var in data:
-                train_input_data[var] = data[var]
-    
-    train_target_data = {}
-    with np.load(train_target_file) as data:
-        for var in output_variables:
-            if var in data:
-                train_target_data[var] = data[var]
+    for lead_time in lead_times:
 
-    event("LOAD TRAIN DATA")
-
-    input_stats = {}
-    for var in input_variables:
-        if var in train_input_data:
-            var_data = train_input_data[var]
-            # Handle different dimensions
-            if var_data.ndim > 2:
-                # Calculate stats across all dimensions except the first (samples)
-                axes = tuple(range(0, var_data.ndim))
-                mean = np.mean(var_data, axis=axes)
-                std = np.std(var_data, axis=axes)
-            else:
-                mean = np.mean(var_data)
-                std = np.std(var_data)
-            
-            input_stats[var] = {'mean': mean, 'std': std}
-
-    # Calculate target stats for this lead time
-    target_stats = {}
-    for var in output_variables:
-        if var in train_target_data:
-            var_data = train_target_data[var]
-            # Handle different dimensions
-            if var_data.ndim > 2:
-                # Calculate stats across all dimensions except the first (samples)
-                axes = tuple(range(0, var_data.ndim))
-                mean = np.mean(var_data, axis=axes)
-                std = np.std(var_data, axis=axes)
-            else:
-                mean = np.mean(var_data)
-                std = np.std(var_data)
-            
-            target_stats[var] = {'mean': mean, 'std': std}
-
-    event("CALC STATS")
-
-    # Load test data
-    test_input_data = {}
-    with np.load(test_input_file) as data:
-        for var in input_variables:
-            if var in data:
-                test_input_data[var] = data[var]
-    
-    test_target_data = {}
-    with np.load(test_target_file) as data:
-        for var in output_variables:
-            if var in data:
-                test_target_data[var] = data[var]
-
-    event("LOAD TEST DATA")
-
-    if world_rank == 0:
-        logger.info(f"\n{'='*50}")
-        logger.info(f"Training for Lead Time: {lead_time} hours")
-        logger.info(f"{'='*50}")
-
-
-    # Create training dataset for the current lead time using pre-loaded data
-    train_dataset = BiasCorrectionDataset(
-        lead_time=lead_time, 
-        input_variables=input_variables,
-        output_variables=output_variables,
-        input_data=train_input_data,
-        target_data=train_target_data,
-        input_stats=input_stats,
-        target_stats=target_stats
-    )
-    
-    # Create validation dataset using a portion of test data
-    val_dataset = BiasCorrectionDataset(
-        lead_time=lead_time, 
-        input_variables=input_variables,
-        output_variables=output_variables,
-        input_data=test_input_data,
-        target_data=test_target_data,
-        input_stats=input_stats,  # Use same normalization stats as training
-        target_stats=target_stats
-    )
-
-    event("CREATE DATASETS")
-
-    # Clear memory after dataset creation
-    #del train_input_data, train_target_data, test_input_data, test_target_data
-    #gc.collect()
-    #torch.cuda.empty_cache()
-
-    print_memory_stats(world_rank, f"After data loading for lead time {lead_time}")
-
-    # Initialize a new model for each lead time - no DDP yet
-    #model = UNet(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
-    # model.load_state_dict(torch.load(f'checkpoint/{dataset_name}_lead_time_{lead_time}_best.pth'))
-    model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
-    # logger.info(f"Using model: {args.model}")
-    model = model.to(device)
-    
-    event("MODEL IS ON DEVICE")
-
-    # Loss and Optimizer
-    criterion = nn.MSELoss()  # Mean Squared Error Loss
-    optimizer = optim.AdamW(model.parameters(), lr=5e-4)
-    
-    # Train model for this lead time with DDP
-    lead_time_result = train_unet_individual_lead_time(
-        outdir,
-        model,
-        subgroup,
-        train_dataset,
-        val_dataset,
-        criterion,
-        optimizer,
-        lead_time=lead_time,
-        dataset_name=dataset_name,
-        num_epochs=num_epochs,
-        batch_size=batch_size,
-        patience=patience,
-        device=device,
-        local_rank=local_rank,
-        world_size=world_size
-    )
-    
-    # Store results
-    all_lead_time_results[lead_time] = lead_time_result
-
-    event("LEADTIME RESULT SAVED")
-
-    # Force cleanup
-    #del model, optimizer, criterion, train_dataset, val_dataset
-    #gc.collect()
-    #torch.cuda.empty_cache()
-
-    event("FORCE CLEANUP")
-
-    # Wait for all processes before continuing to next lead time
-    dist.barrier(device_ids=[local_rank])
-
-    event("BARRIER - FORCE CLEANUP")
-   
-    # Only evaluate on rank 0 to avoid duplicate work
-    if world_rank == min(group_ranks):
-        # Load the best model for this lead time
-        best_model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
-        best_model.load_state_dict(torch.load(f'{outdir}/checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth'))
-        best_model = best_model.to(device)
+        if world_rank == 0:
+            logger.info(f"\n{'='*50}")
+            logger.info(f"\nProcessing data for lead time {lead_time}...")
+            logger.info(f"\n{'='*50}")
         
-        # Reload test dataset
+        # Load data for this lead time only
+        train_input_file = f"{input_base_dir}/Train/MPAS_T{lead_time}.npz"
+        train_target_file = f"{target_base_dir}/Train/ERA5_T{lead_time}.npz"
+        test_input_file = f"{input_base_dir}/Test/MPAS_T{lead_time}.npz"
+        test_target_file = f"{target_base_dir}/Test/ERA5_T{lead_time}.npz"
+        
+        # Load training data
+        train_input_data = {}
+        with np.load(train_input_file) as data:
+            for var in input_variables:
+                if var in data:
+                    train_input_data[var] = data[var]
+        
+        train_target_data = {}
+        with np.load(train_target_file) as data:
+            for var in output_variables:
+                if var in data:
+                    train_target_data[var] = data[var]
+
+        event("LOAD TRAIN DATA")
+
+        input_stats = {}
+        for var in input_variables:
+            if var in train_input_data:
+                var_data = train_input_data[var]
+                # Handle different dimensions
+                if var_data.ndim > 2:
+                    # Calculate stats across all dimensions except the first (samples)
+                    axes = tuple(range(0, var_data.ndim))
+                    mean = np.mean(var_data, axis=axes)
+                    std = np.std(var_data, axis=axes)
+                else:
+                    mean = np.mean(var_data)
+                    std = np.std(var_data)
+                
+                input_stats[var] = {'mean': mean, 'std': std}
+
+        # Calculate target stats for this lead time
+        target_stats = {}
+        for var in output_variables:
+            if var in train_target_data:
+                var_data = train_target_data[var]
+                # Handle different dimensions
+                if var_data.ndim > 2:
+                    # Calculate stats across all dimensions except the first (samples)
+                    axes = tuple(range(0, var_data.ndim))
+                    mean = np.mean(var_data, axis=axes)
+                    std = np.std(var_data, axis=axes)
+                else:
+                    mean = np.mean(var_data)
+                    std = np.std(var_data)
+                
+                target_stats[var] = {'mean': mean, 'std': std}
+
+        event("CALC STATS")
+
+        # Load test data
         test_input_data = {}
         with np.load(test_input_file) as data:
             for var in input_variables:
@@ -967,47 +836,154 @@ def main():
                 if var in data:
                     test_target_data[var] = data[var]
 
-        test_dataset = BiasCorrectionDataset(
-            lead_time=lead_time,
+        event("LOAD TEST DATA")
+
+        if world_rank == 0:
+            logger.info(f"\n{'='*50}")
+            logger.info(f"Training for Lead Time: {lead_time} hours")
+            logger.info(f"{'='*50}")
+ 
+
+        # Create training dataset for the current lead time using pre-loaded data
+        train_dataset = BiasCorrectionDataset(
+            lead_time=lead_time, 
             input_variables=input_variables,
             output_variables=output_variables,
-            input_data=test_input_data,
-            target_data=test_target_data,
+            input_data=train_input_data,
+            target_data=train_target_data,
             input_stats=input_stats,
             target_stats=target_stats
         )
         
-        test_loader = DataLoader(
-            test_dataset, 
-            batch_size=batch_size, 
-            shuffle=False,
-            num_workers=4
+        # Create validation dataset using a portion of test data
+        val_dataset = BiasCorrectionDataset(
+            lead_time=lead_time, 
+            input_variables=input_variables,
+            output_variables=output_variables,
+            input_data=test_input_data,
+            target_data=test_target_data,
+            input_stats=input_stats,  # Use same normalization stats as training
+            target_stats=target_stats
+        )
+
+        event("CREATE DATASETS")
+
+        # Clear memory after dataset creation
+        del train_input_data, train_target_data, test_input_data, test_target_data
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        print_memory_stats(world_rank, f"After data loading for lead time {lead_time}")
+
+        # Initialize a new model for each lead time - no DDP yet
+        #model = UNet(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
+        # model.load_state_dict(torch.load(f'checkpoint/{dataset_name}_lead_time_{lead_time}_best.pth'))
+        model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
+        # logger.info(f"Using model: {args.model}")
+        model = model.to(device)
+        
+        event("MODEL IS ON DEVICE")
+
+        # Loss and Optimizer
+        criterion = nn.MSELoss()  # Mean Squared Error Loss
+        optimizer = optim.AdamW(model.parameters(), lr=5e-4)
+        
+        # Train model for this lead time with DDP
+        lead_time_result = train_unet_individual_lead_time(
+            outdir,
+            model,
+            train_dataset,
+            val_dataset,
+            criterion,
+            optimizer,
+            lead_time=lead_time,
+            dataset_name=dataset_name,
+            num_epochs=num_epochs,
+            batch_size=batch_size,
+            patience=patience,
+            device=device,
+            local_rank=local_rank,
+            world_size=world_size
         )
         
-        event("LOAD EVAL DATA")
+        # Store results
+        all_lead_time_results[lead_time] = lead_time_result
 
-        # Evaluate model on test data (with denormalization)
-        test_truths, test_predictions = evaluate_model(
-            best_model, 
-            test_loader, 
-            device,
-            target_stats=target_stats  # Pass stats for denormalization
-        )
-        
-        # Calculate metrics (using your external function)
-        metrics = calculate_metrics(test_truths, test_predictions)
-        
-        # Save results with output variable information (using your external function)
-        save_results(outdir, world_rank, dataset_name, lead_time, test_truths, test_predictions, metrics, 
-                    output_variables)
+        event("LEADTIME RESULT SAVED")
 
-        # Clean up
-        #del best_model, test_dataset, test_input_data, test_target_data
-        #gc.collect()
-        #torch.cuda.empty_cache()
+        # Force cleanup
+        del model, optimizer, criterion, train_dataset, val_dataset
+        gc.collect()
+        torch.cuda.empty_cache()
 
-        logger.info(f"Completed training and evaluation for lead time {lead_time}")
-    event("FINISH EVAL")
+        event("FORCE CLEANUP")
+
+        # Wait for all processes before continuing to next lead time
+        dist.barrier(device_ids=[local_rank])
+ 
+        event("BARRIER - FORCE CLEANUP")
+       
+        # Only evaluate on rank 0 to avoid duplicate work
+        if world_rank == 0:
+            # Load the best model for this lead time
+            best_model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
+            best_model.load_state_dict(torch.load(f'{outdir}/checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth'))
+            best_model = best_model.to(device)
+            
+            # Reload test dataset
+            test_input_data = {}
+            with np.load(test_input_file) as data:
+                for var in input_variables:
+                    if var in data:
+                        test_input_data[var] = data[var]
+            
+            test_target_data = {}
+            with np.load(test_target_file) as data:
+                for var in output_variables:
+                    if var in data:
+                        test_target_data[var] = data[var]
+
+            test_dataset = BiasCorrectionDataset(
+                lead_time=lead_time,
+                input_variables=input_variables,
+                output_variables=output_variables,
+                input_data=test_input_data,
+                target_data=test_target_data,
+                input_stats=input_stats,
+                target_stats=target_stats
+            )
+            
+            test_loader = DataLoader(
+                test_dataset, 
+                batch_size=batch_size, 
+                shuffle=False,
+                num_workers=4
+            )
+            
+            event("LOAD EVAL DATA")
+
+            # Evaluate model on test data (with denormalization)
+            test_truths, test_predictions = evaluate_model(
+                best_model, 
+                test_loader, 
+                device,
+                target_stats=target_stats  # Pass stats for denormalization
+            )
+            
+            # Calculate metrics (using your external function)
+            metrics = calculate_metrics(test_truths, test_predictions)
+            
+            # Save results with output variable information (using your external function)
+            save_results(outdir, dataset_name, lead_time, test_truths, test_predictions, metrics, 
+                        output_variables)
+
+            # Clean up
+            del best_model, test_dataset, test_input_data, test_target_data
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            logger.info(f"Completed training and evaluation for lead time {lead_time}")
+        event("FINISH EVAL")
     
     event("FINISHED LEADTIME")
 
@@ -1026,4 +1002,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
 

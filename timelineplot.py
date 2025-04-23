@@ -23,17 +23,18 @@ def parse_log_files(log_dir):
     """
     results = defaultdict(list)
 
-    log_pattern = re.compile(r"train_rank(\d+)_(\d+)\.log$")
+    log_pattern = re.compile(r"(\d+)_train_rank(\d+)_(\d+)\.log$")
     line_pattern = re.compile(r"(\d+\.\d+):(.+)")
     start_time = sys.float_info.max
     stop_time = 0.0
 
-    for file_path in Path(log_dir).glob("train_rank*.log"):
+    #import pdb; pdb.set_trace()
+    for file_path in Path(log_dir).glob("*train_rank*.log"):
         match = log_pattern.match(file_path.name)
         if not match:
             continue
-        rank_id = int(match.group(1))
-        total_ranks = int(match.group(2))
+        rank_id = int(match.group(2))
+        total_ranks = int(match.group(3))
         with open(file_path, 'r') as f:
             for line in f:
                 line = line.strip()
