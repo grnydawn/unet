@@ -674,7 +674,7 @@ def main():
     dist.init_process_group(
         backend="nccl",
         init_method="env://",
-        timeout=timedelta(seconds=120)
+        timeout=timedelta(minutes=30)
     )
 
     # Print GPU status (only from rank 0)
