@@ -35,5 +35,5 @@ time srun -N ${NUM_NODES} --ntasks-per-node=8 -n ${NUM_TASKS} \
 		--batch_size 4 \
 		--model residual_unet_plus \
 		--dataset ResidualUNetPlusPlus \
-		--outdir "/lustre/orion/cli115/scratch/grnydawn/unet_${NUM_NODES}"
+		--outdir "/lustre/orion/cli115/scratch/grnydawn/unet_par_${NUM_NODES}.1"
 

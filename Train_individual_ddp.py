@@ -722,7 +722,8 @@ def main():
     outdir = args.outdir
    
     # Define lead times
-    lead_times = [6, 12, 18, 24, 30, 36, 42, 48]
+    #lead_times = [6, 12, 18, 24, 30, 36, 42, 48]
+    lead_times = [6, 12, 18, 24]
     
     # Define input and output variables
     input_variables = ['mslp', 'u10', 'v10', 't2m', 'q2', 'd2m']
