@@ -655,6 +655,9 @@ def main():
     
     event("TRAINING BEGIN")
 
+    # memory snapshot
+    #torch.cuda.memory._record_memory_history()
+
     # Set device BEFORE initializing process group
     torch.cuda.set_device(local_rank)
     device = torch.device(f'cuda:{local_rank}')
@@ -716,7 +719,7 @@ def main():
     
     # Define hyperparameters
     #num_epochs = 200
-    num_epochs = 1 # for timing
+    num_epochs = 3 # for timing
     batch_size = args.batch_size  # Per-GPU batch size
     patience = 5
     base_channels = args.base_channels
@@ -995,6 +998,9 @@ def main():
         logger.info("\nIndividual Lead Time Training and Evaluation Complete!")
         logger.info(f"Trained {len(lead_times)} separate models, one for each lead time.")
     
+    # memory snapshot
+    #torch.cuda.memory._dump_snapshot(f"{outdir}/unet_memory_{world_rank}.pickle")
+
     # Clean up distributed process group
     dist.destroy_process_group()
 

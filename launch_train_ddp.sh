@@ -57,7 +57,7 @@ export PYTHONPATH=$PWD/../src:$PYTHONPATH
 
 #NUM_NODES="${SLURM_JOB_NUM_NODES}"
 #NUM_NODES=3
-for NUM_NODES in 2 1
+for NUM_NODES in 1
 do
 
 NUM_TASKS=$((NUM_NODES*8))
@@ -70,7 +70,7 @@ time srun -N ${NUM_NODES} --ntasks-per-node=8 -n ${NUM_TASKS} \
 		--batch_size 4 \
 		--model residual_unet_plus \
 		--dataset ResidualUNetPlusPlus \
-		--outdir "/lustre/orion/cli115/scratch/grnydawn/unet_${NUM_NODES}"
+		--outdir "/lustre/orion/cli115/scratch/grnydawn/unet_org_${NUM_NODES}"
 
 #		--outdir "/lustre/orion/cli115/scratch/grnydawn/unet_${SLURM_JOB_NUM_NODES}"
 	#python Train_individual_ddp.py --base_channels 16 --batch_size 16 --model residual_unet_plus --dataset ResidualUNetPlusPlus
