@@ -395,18 +395,20 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
         logger.info(f"\n🔹 Training Model for Lead Time = {lead_time} hours")
     
     # Create distributed samplers
+        #num_replicas=world_size,
     train_sampler = DistributedSampler(
         train_dataset, 
-        num_replicas=world_size,
+        num_replicas=len(group_ranks),
         rank=local_rank,
         shuffle=True,
         drop_last=False
     )
     
     # Use DistributedSampler for validation too to ensure proper sharding
+        #num_replicas=world_size,
     val_sampler = DistributedSampler(
         val_dataset,
-        num_replicas=world_size,
+        num_replicas=len(group_ranks),
         rank=local_rank,
         shuffle=False,
         drop_last=False
@@ -731,7 +733,7 @@ def main():
     
     # Define hyperparameters
     #num_epochs = 200
-    num_epochs = 1 # for timing
+    num_epochs = 3 # for timing
     batch_size = args.batch_size  # Per-GPU batch size
     patience = 5
     base_channels = args.base_channels
