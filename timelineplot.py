@@ -13,6 +13,10 @@ import random
 import pdb
 import statistics
 
+log_pattern1 = re.compile(r"(\d+)_train_rank(\d+)_(\d+)\.log$")
+log_pattern2 = re.compile(r"train_rank(\d+)_(\d+)\.log$")
+line_pattern = re.compile(r"(\d+\.\d+):(.+)")
+
 def parse_log_files(log_dir):
     """
     Reads log files with the pattern 'train_rank{RANKID}_{TOTALRANKS}.log' from the specified directory.
@@ -26,17 +30,23 @@ def parse_log_files(log_dir):
     """
     results = defaultdict(list)
 
-    log_pattern = re.compile(r"train_rank(\d+)_(\d+)\.log$")
-    line_pattern = re.compile(r"(\d+\.\d+):(.+)")
     start_time = sys.float_info.max
     stop_time = 0.0
 
-    for file_path in Path(log_dir).glob("train_rank*.log"):
-        match = log_pattern.match(file_path.name)
-        if not match:
-            continue
-        rank_id = int(match.group(1))
-        total_ranks = int(match.group(2))
+    #import pdb; pdb.set_trace()
+    for file_path in Path(log_dir).glob("*train_rank*.log"):
+        match = log_pattern1.match(file_path.name)
+        if match:
+            rank_id = int(match.group(2))
+            total_ranks = int(match.group(3))
+        else:
+            match = log_pattern2.match(file_path.name)
+            if match:
+                rank_id = int(match.group(1))
+                total_ranks = int(match.group(2))
+            else:
+                continue
+
         with open(file_path, 'r') as f:
             for line in f:
                 line = line.strip()
@@ -51,8 +61,48 @@ def parse_log_files(log_dir):
     for events in results.values():
         for event in events:
             event[0] -= start_time
-        
+
     return results, stop_time - start_time
+
+#def parse_log_files(log_dir):
+#    """
+#    Reads log files with the pattern 'train_rank{RANKID}_{TOTALRANKS}.log' from the specified directory.
+#    Extracts rank ID from filename and (time, remaining text) from matching lines in the file.
+#
+#    Parameters:
+#        log_dir (str or Path): Directory containing the log files.
+#
+#    Returns:
+#        Dict[int, List[Tuple[float, str]]]: Dictionary mapping rank ID to list of (time, event_text).
+#    """
+#    results = defaultdict(list)
+#
+#    line_pattern = re.compile(r"(\d+\.\d+):(.+)")
+#    start_time = sys.float_info.max
+#    stop_time = 0.0
+#
+#    for file_path in Path(log_dir).glob("train_rank*.log"):
+#        match = log_pattern.match(file_path.name)
+#        if not match:
+#            continue
+#        rank_id = int(match.group(1))
+#        total_ranks = int(match.group(2))
+#        with open(file_path, 'r') as f:
+#            for line in f:
+#                line = line.strip()
+#                line_match = line_pattern.match(line)
+#                if line_match:
+#                    time = float(line_match.group(1))
+#                    start_time = min(start_time, time)
+#                    stop_time = max(stop_time, time)
+#                    remaining_text = line_match.group(2).strip()
+#                    results[rank_id].append([time, remaining_text])
+#
+#    for events in results.values():
+#        for event in events:
+#            event[0] -= start_time
+#        
+#    return results, stop_time - start_time
 
 def plot_timeline(data, stop_time, plot_title):
     """
