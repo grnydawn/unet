@@ -1,9 +1,12 @@
 import os
 import re
 import sys
+import argparse
+import glob
 from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from matplotlib.backends.backend_pdf import PdfPages
 from collections import defaultdict
 from matplotlib import cm
 import random
@@ -51,7 +54,7 @@ def parse_log_files(log_dir):
         
     return results, stop_time - start_time
 
-def plot_timeline(data, stop_time, num_nodes):
+def plot_timeline(data, stop_time, plot_title):
     """
     Plots a timeline of events for each rank.
 
@@ -112,20 +115,84 @@ def plot_timeline(data, stop_time, num_nodes):
     ax.set_xlim(0, stop_time)
     ax.set_xlabel("Time (seconds)")
     ax.set_ylabel("Rank Number")
-    ax.set_title(f"Training Step Timeline on {num_nodes} Frontier nodes")
+    #ax.set_title(f"Training Step Timeline on Frontier nodenodes")
+    ax.set_title(plot_title)
     ax.legend(handles=legend_handles, bbox_to_anchor=(1.05, 1), loc='upper left')
     ax.grid(True)
     plt.tight_layout()
     #plt.show()
-    plt.savefig(f"timeline_plot_{num_nodes}.png", dpi=300)
+
+
+def main():
+
+    parser = argparse.ArgumentParser(description='Generate plots and save as PDF or PNG.')
+    parser.add_argument('path_pattern', type=str, nargs='+',
+                        help='Directory path or glob pattern (e.g. "./data" or "./data/*/")')
+    parser.add_argument('--format', choices=['pdf', 'png'], default='pdf',
+                        help='Output format: pdf or png (default: pdf)')
+    parser.add_argument('--name', type=str, default='output',
+                        help='Base name for the output files (default: output)')
+
+    args = parser.parse_args()
+
+    # Resolve path(s) using glob
+    matched_dirs = []
+    for pat in args.path_pattern:
+        matched_dirs.extend([p for p in glob.glob(pat) if os.path.isdir(p)])
+    matched_dirs.sort()
+
+    if not matched_dirs:
+        print(f"No directories matched pattern: {args.path_pattern}")
+        exit(-1)
+
+
+    if args.format == 'pdf':
+        with PdfPages(f'{args.name}.pdf') as pdf:
+            for folder in matched_dirs:
+                testid = os.path.basename(folder)
+                title = f"Training Step Timeline on Frontier({testid})"
+                parsed_data, stop = parse_log_files(folder)
+                plot_timeline(parsed_data, stop, title)
+                pdf.savefig()
+                plt.close()
+
+    elif args.format == 'png':
+        for folder in matched_dirs:
+            parsed_data, stop = parse_log_files(folder)
+            testid = os.path.basename(folder)
+            title = f"Training Step Timeline on Frontier({testid})"
+            plot_timeline(parsed_data, stop, title)
+            plt.savefig(f"timeline_plot_{testid}.png", dpi=300)
+            plt.close()
+
+    else:
+        raise ValueError("Unsupported output format. Use 'pdf' or 'png'.")
 
 # Example usage
 if __name__ == "__main__":
-    #directory = "/lustre/orion/cli115/proj-shared/grnydawn/repos/github/unet/1node"
-    #directory = "/lustre/orion/cli115/proj-shared/grnydawn/repos/github/unet/4nodes"
-    if len(sys.argv) < 2:
-        print("Usage: python timeline.py <directory>")
-        sys.exit(-1)
-    parsed_data, stop = parse_log_files(sys.argv[1])
-    plot_timeline(parsed_data, stop, os.path.basename(sys.argv[1]))
 
+    main()
+#    parser = argparse.ArgumentParser(description='Generate plots and save as PDF or PNG.')
+#    parser.add_argument('path_pattern', type=str, nargs='+',
+#                        help='Directory path or glob pattern (e.g. "./data" or "./data/*/")')
+#    parser.add_argument('--format', choices=['pdf', 'png'], default='pdf',
+#                        help='Output format: pdf or png (default: pdf)')
+#    parser.add_argument('--name', type=str, default='output',
+#                        help='Base name for the output files (default: output)')
+#
+#    args = parser.parse_args()
+#
+#    # Resolve path(s) using glob
+#    matched_dirs = []
+#    for pat in args.path_pattern:
+#        matched_dirs.extend([p for p in glob.glob(pat) if os.path.isdir(p)])
+#    matched_dirs.sort()
+#
+#    if not matched_dirs:
+#        print(f"No directories matched pattern: {args.path_pattern}")
+#
+#    else:
+#        for d in matched_dirs:
+#            print(f"Generating plots in: {d}")
+#            generate(args.format, args.name, d)
+#
