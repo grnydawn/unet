@@ -200,7 +200,24 @@ def main():
         with PdfPages(f'{args.name}.pdf') as pdf:
             for folder in matched_dirs:
                 testid = os.path.basename(folder)
-                title = f"Training Step Timeline on Frontier({testid})"
+                rs = testid.rsplit(".", 2)
+                if len(rs) == 3:
+                    testname, num_nodes, num_tries = rs
+                else:
+                    print(f"Wrong log directory name: {testid}")
+                    exit(-1)
+                    #import pdb ;pdb.set_trace()
+
+                if num_tries.endswith("1"):
+                    tries = num_tries + "st try"
+
+                elif num_tries.endswith("2"):
+                    tries = num_tries + "nd try"
+
+                else:
+                    tries = num_tries + "th try"
+
+                title = f"Training Step Timeline on Frontier: {testname}, {num_nodes} node(s), {tries}"
                 parsed_data, stop = parse_log_files(folder)
                 plot_timeline(parsed_data, stop, title)
                 pdf.savefig()
@@ -210,7 +227,25 @@ def main():
         for folder in matched_dirs:
             parsed_data, stop = parse_log_files(folder)
             testid = os.path.basename(folder)
-            title = f"Training Step Timeline on Frontier({testid})"
+            rs = testid.rsplit(".", 2)
+            if len(rs) == 3:
+                testname, num_nodes, num_tries = rs
+            else:
+                print(f"Wrong log directory name: {testid}")
+                exit(-1)
+                #import pdb ;pdb.set_trace()
+
+            if num_tries.endswith("1"):
+                tries = num_tries + "st try"
+
+            elif num_tries.endswith("2"):
+                tries = num_tries + "nd try"
+
+            else:
+                tries = num_tries + "th try"
+
+            title = f"Training Step Timeline on Frontier: {testname}, {num_nodes} node(s), {tries}"
+
             plot_timeline(parsed_data, stop, title)
             plt.savefig(f"timeline_plot_{testid}.png", dpi=300)
             plt.close()
@@ -222,27 +257,3 @@ def main():
 if __name__ == "__main__":
 
     main()
-#    parser = argparse.ArgumentParser(description='Generate plots and save as PDF or PNG.')
-#    parser.add_argument('path_pattern', type=str, nargs='+',
-#                        help='Directory path or glob pattern (e.g. "./data" or "./data/*/")')
-#    parser.add_argument('--format', choices=['pdf', 'png'], default='pdf',
-#                        help='Output format: pdf or png (default: pdf)')
-#    parser.add_argument('--name', type=str, default='output',
-#                        help='Base name for the output files (default: output)')
-#
-#    args = parser.parse_args()
-#
-#    # Resolve path(s) using glob
-#    matched_dirs = []
-#    for pat in args.path_pattern:
-#        matched_dirs.extend([p for p in glob.glob(pat) if os.path.isdir(p)])
-#    matched_dirs.sort()
-#
-#    if not matched_dirs:
-#        print(f"No directories matched pattern: {args.path_pattern}")
-#
-#    else:
-#        for d in matched_dirs:
-#            print(f"Generating plots in: {d}")
-#            generate(args.format, args.name, d)
-#
