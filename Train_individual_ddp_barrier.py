@@ -568,8 +568,7 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
 
         event("CALC AVG LOSS")
         # Wait for all processes to finish the epoch
-        if world_rank in group_ranks:
-            dist.barrier(group=subgroup, device_ids=[local_rank])
+        dist.barrier(group=subgroup, device_ids=[local_rank])
         event("BARRIER - CALC AVG LOSS")
     
     return {
@@ -957,8 +956,7 @@ def main():
     event("FORCE CLEANUP")
 
     # Wait for all processes before continuing to next lead time
-    if world_rank in group_ranks:
-        dist.barrier(group=subgroup, device_ids=[local_rank])
+    dist.barrier(device_ids=[local_rank])
 
     event("BARRIER - FORCE CLEANUP")
    
@@ -1027,8 +1025,7 @@ def main():
     event("FINISHED LEADTIME")
 
     # Final synchronization
-    if world_rank in group_ranks:
-        dist.barrier(group=subgroup, device_ids=[local_rank])
+    dist.barrier(device_ids=[local_rank])
     event("BARRIER - FINISHED LEADTIME")
     
     if world_rank == 0:

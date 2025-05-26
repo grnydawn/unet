@@ -1,6 +1,6 @@
 import os
 
-os.environ['MIOPEN_USER_DB_PATH'] = f"/lustre/orion/scratch/grnydawn/cli190/tmp/miopen_cache_{os.environ['SLURM_PROCID']}_{os.environ['SLURM_NTASKS']}"
+os.environ['MIOPEN_USER_DB_PATH'] = f"/lustre/orion/scratch/grnydawn/cli190/tmp/miopen_cache_{os.environ['LEAD_TIME']}_{os.environ['SLURM_PROCID']}_{os.environ['SLURM_NTASKS']}"
 os.makedirs(os.environ['MIOPEN_USER_DB_PATH'], exist_ok=True)
 os.environ['MIOPEN_DISABLE_CACHE'] = "1"
 
@@ -358,11 +358,11 @@ def calculate_metrics(truths, predictions, return_p_value=False):
     return metrics
 
 
-def save_results(outdir, world_rank, dataset_name, lead_time, test_truths, test_predictions, metrics, 
+def save_results(outdir, dataset_name, lead_time, test_truths, test_predictions, metrics, 
                 output_variables):
 
     # Create results directory with dataset name and lead time
-    results_dir = f'{outdir}/Results/{dataset_name}_results/lead_time_{lead_time}_rank_{world_rank}'
+    results_dir = f'{outdir}/Results/{dataset_name}_results/lead_time_{lead_time}'
     os.makedirs(results_dir, exist_ok=True)
     
     # Save numpy arrays
@@ -383,9 +383,9 @@ def save_results(outdir, world_rank, dataset_name, lead_time, test_truths, test_
 
 
 
-def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_ranks, train_dataset, val_dataset, criterion, optimizer, 
+def train_unet_individual_lead_time(outdir, model, train_dataset, val_dataset, criterion, optimizer, 
                                     lead_time, dataset_name='bias_correction', num_epochs=200, 
-                                    batch_size=32, patience=5, device=None,
+                                    batch_size=32, patience=5, device=None, 
                                     local_rank=0, world_size=1):
     """
     Train a U-Net model for a specific lead time using DDP for multi-GPU training
@@ -394,24 +394,24 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Only print from rank 0 to avoid duplicate logs
-    print_memory_stats(world_rank, f"Start of train_unet for lead time {lead_time}")
-    logger.info(f"\n🔹 Rank{world_rank}: Training Model for Lead Time = {lead_time} hours")
+    if local_rank == 0:
+        print_memory_stats(local_rank, f"Start of train_unet for lead time {lead_time}")
+        #logger.info("We are using ", device)
+        logger.info(f"\n🔹 Training Model for Lead Time = {lead_time} hours")
     
     # Create distributed samplers
-        #num_replicas=world_size,
     train_sampler = DistributedSampler(
         train_dataset, 
-        num_replicas=len(group_ranks),
+        num_replicas=world_size,
         rank=local_rank,
         shuffle=True,
         drop_last=False
     )
     
     # Use DistributedSampler for validation too to ensure proper sharding
-        #num_replicas=world_size,
     val_sampler = DistributedSampler(
         val_dataset,
-        num_replicas=len(group_ranks),
+        num_replicas=world_size,
         rank=local_rank,
         shuffle=False,
         drop_last=False
@@ -437,9 +437,7 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
     
     # Wrap model in DDP
     model.to(device) 
-
-    #ddp_model = DDP(model, device_ids=[local_rank], process_group=subgroup)
-    model = DDP(model, device_ids=[local_rank], process_group=subgroup, output_device=local_rank) #,find_unused_parameters=True)
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank) #,find_unused_parameters=True)
     
     # Early stopping tracking
     epochs_no_improve = 0
@@ -481,8 +479,8 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
             batch_loss = loss.item()
             
             # Log every batch but only from rank 0
-            if world_rank == min(group_ranks):
-                logger.info(f"Rank{world_rank}: Lead Time {lead_time}, Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)}, "
+            if (batch_idx + 1) % 1 == 0 and local_rank == 0:
+                logger.info(f"  Lead Time {lead_time}, Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)}, "
                       f"Batch Loss: {batch_loss:.4f}")
 
             train_epoch_loss += batch_loss
@@ -533,34 +531,32 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
         val_losses.append(avg_val_loss)
         
         # Print progress (only from rank 0)
-        logger.info(f"Rank{world_rank}: Lead Time {lead_time}, Epoch {epoch+1}/{num_epochs}, "
-            f"Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
-        print_memory_stats(world_rank, f"End of epoch {epoch+1}")
+        if local_rank == 0:
+            logger.info(f"Lead Time {lead_time}, Epoch {epoch+1}/{num_epochs}, "
+                f"Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
+            print_memory_stats(local_rank, f"End of epoch {epoch+1}")
         
         # Early stopping logic (only save model from rank 0)
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             epochs_no_improve = 0
             
-            # Save best model from each subgroup
-            if world_rank == min(group_ranks):
+            # Save best model from rank 0 only
+            if local_rank == 0:
                 # Save the model state dict
                 torch.save(model.module.state_dict(), f'{outdir}/checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth')
         else:
             epochs_no_improve += 1
         
-        logger.info(f"Rank{world_rank}: BEFORE epochs_no_improve = {epochs_no_improve}")
         # Make sure all processes get the same decision on early stopping
         epochs_no_improve_tensor = torch.tensor([epochs_no_improve], device=device)
-        #dist.broadcast(epochs_no_improve_tensor, src=0)
-        # Broadcast only within the subgroup
-        dist.broadcast(epochs_no_improve_tensor, src=min(group_ranks), group=subgroup)
+        dist.broadcast(epochs_no_improve_tensor, src=0)
         epochs_no_improve = epochs_no_improve_tensor.item()
-        logger.info(f"Rank{world_rank}: AFTER epochs_no_improve = {epochs_no_improve}")
         
         # Early stopping condition
         if epochs_no_improve >= patience:
-            logger.info(f"Rank{world_rank}: Early stopping at epoch {epoch+1}")
+            if local_rank == 0:
+                logger.info(f"Early stopping at epoch {epoch+1}")
             break
         
         torch.cuda.empty_cache()
@@ -568,8 +564,7 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
 
         event("CALC AVG LOSS")
         # Wait for all processes to finish the epoch
-        if world_rank in group_ranks:
-            dist.barrier(group=subgroup, device_ids=[local_rank])
+        dist.barrier(device_ids=[local_rank])
         event("BARRIER - CALC AVG LOSS")
     
     return {
@@ -580,9 +575,12 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
     }
 
 def print_memory_stats(rank, location):
-    gpu_memory_allocated = torch.cuda.memory_allocated() / (1024 ** 3)
-    gpu_memory_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
-    logger.info(f"[rank{rank}:{location}] GPU Memory: Allocated={gpu_memory_allocated:.2f}GB, Reserved={gpu_memory_reserved:.2f}GB")
+    if rank == 0:
+        gpu_memory_allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+        gpu_memory_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+        logger.info(f"[{location}] GPU Memory: Allocated={gpu_memory_allocated:.2f}GB, Reserved={gpu_memory_reserved:.2f}GB")
+
+
 
 def evaluate_model(model, test_loader, device, target_stats=None):
     """
@@ -644,60 +642,15 @@ def main():
     global logger
 
     # Set up SLURM-based distributed training environment
-    os.environ['MASTER_ADDR'] = str(os.environ['MASTER_ADDR'])
-    os.environ['MASTER_PORT'] = str(os.environ['MASTER_PORT'])
+    #os.environ['MASTER_ADDR'] = str(os.environ['HOSTNAME'])
+    os.environ['MASTER_PORT'] = "29500"
     os.environ['WORLD_SIZE'] = os.environ['SLURM_NTASKS']
     os.environ['RANK'] = os.environ['SLURM_PROCID']
 
-    world_size = int(os.environ['WORLD_SIZE'])
-    world_rank = int(os.environ['RANK'])
+    world_size = int(os.environ['SLURM_NTASKS'])
+    world_rank = int(os.environ['SLURM_PROCID'])
     local_rank = int(os.environ['SLURM_LOCALID'])
      
-    jobid = os.environ['SLURM_JOB_ID']
-
-    logger = logging.getLogger(f"mylogger_{world_rank}")
-
-    file_handler = logging.FileHandler(f"logs/{jobid}_train_rank{world_rank}_{world_size}.log")
-    #file_handler.setLevel(logging.INFO)
-    logger.addHandler(file_handler)
-    
-    event("TRAINING BEGIN")
-
-    # memory snapshot
-    torch.cuda.memory._record_memory_history()
-
-    # Set device BEFORE initializing process group
-    #torch.cuda.set_device(local_rank)
-    #device = torch.device(f'cuda:{local_rank}')
-
-    # Set the device for each rank
-    num_gpus = torch.cuda.device_count()
-    torch.cuda.set_device(local_rank % num_gpus)
-    device = torch.device(f'cuda:{local_rank}')
-
-    # Initialize the distributed process group with proper device specification
-    #dist.init_process_group('nccl', timeout=timedelta(minutes=30), rank=world_rank, world_size=world_size)  
-    # Initialize default process group
-    dist.init_process_group(
-        backend="nccl",
-        init_method="env://",
-        timeout=timedelta(minutes=30)
-    )
-
-    # Print GPU status (only from rank 0)
-    logger.info(f"Using local_rank={local_rank}, world_rank={world_rank}")
-    if world_rank == 0:
-        logger.info(f"Initialized distributed training with {world_size} processes")
-        logger.info(f"Using GPU: {torch.cuda.get_device_name(local_rank)}")
-
-    event("INIT DIST")
-
-    # Use explicit barrier with device_ids
-    dist.barrier(device_ids=[local_rank])
-    event("BARRIER - INIT DIST")
-
-    print_memory_stats(world_rank, "Before data loading")
-
     seed_everything(0)
 
     model_options = {
@@ -712,11 +665,45 @@ def main():
     parser = argparse.ArgumentParser(description="Select a segmentation model.")
     parser.add_argument("--model", type=str, choices=model_options.keys(), default="unet", help="Choose a model")
     parser.add_argument("--dataset", type=str, default="ResidualUNet", help="Specify the dataset name")
+    parser.add_argument("--leadtime", type=int, default=6, help="Specify the lead time [default=6, one of 6, 12, 18, 24, 30, 36, 42, 48")
     parser.add_argument("--base_channels", type=int, default=8, help="Number of base channels for the model")
     parser.add_argument("--batch_size", type=int, default=4, help="batch size for the model")
     parser.add_argument("--outdir", type=str, default=".", help="output directory")
 
     args = parser.parse_args()
+
+    lead_time = args.leadtime
+
+    logger = logging.getLogger("mylogger")
+
+    file_handler = logging.FileHandler(f"logs/train{lead_time}_rank{world_rank}_{world_size}.log")
+    #file_handler.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+ 
+    logger.info(f"MASTER ADDR at RANK {world_rank} = {os.environ['MASTER_ADDR']}")
+   
+    event("TRAINING BEGIN")
+
+    # Set device BEFORE initializing process group
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f'cuda:{local_rank}')
+    
+    # Initialize the distributed process group with proper device specification
+    dist.init_process_group('nccl', timeout=timedelta(minutes=30), rank=world_rank, world_size=world_size)  
+    
+    # Print GPU status (only from rank 0)
+    logger.info(f"Using local_rank={local_rank}, world_rank={world_rank}")
+    if world_rank == 0:
+        logger.info(f"Initialized distributed training with {world_size} processes")
+        logger.info(f"Using GPU: {torch.cuda.get_device_name(local_rank)}")
+
+    event("INIT DIST")
+
+    # Use explicit barrier with device_ids
+    dist.barrier(device_ids=[local_rank])
+    event("BARRIER - INIT DIST")
+
+    print_memory_stats(world_rank, "Before data loading")
     
     # Set dataset name
     dataset_name = args.dataset
@@ -730,7 +717,6 @@ def main():
    
     # Define lead times
     #lead_times = [6, 12, 18, 24, 30, 36, 42, 48]
-    lead_times = [6, 12, 18, 24]
     
     # Define input and output variables
     input_variables = ['mslp', 'u10', 'v10', 't2m', 'q2', 'd2m']
@@ -738,7 +724,7 @@ def main():
     
     # Define hyperparameters
     num_epochs = 200
-    #num_epochs = 5 # for timing
+    #num_epochs = 1 # for timing
     batch_size = args.batch_size  # Per-GPU batch size
     patience = 5
     base_channels = args.base_channels
@@ -781,22 +767,8 @@ def main():
     if world_rank == 0:
         logger.info("Pre-loading data and calculating stats for all lead times...")
     
-    # Setup subgroups
-    num_subgroups = len(lead_times)
-    ranks_per_group = world_size // num_subgroups
-    group_id = world_rank // ranks_per_group
-    lead_time = lead_times[group_id]
-    group_ranks = list(range(group_id * ranks_per_group, (group_id + 1) * ranks_per_group))
-    subgroup = dist.new_group(
-        ranks=group_ranks,
-        use_local_synchronization=True,
-        backend="nccl"
-    )
-
-    if group_id == 0:
-        patience -= 1
-
     event("BEGIN LEADTIME")
+
     if world_rank == 0:
         logger.info(f"\n{'='*50}")
         logger.info(f"\nProcessing data for lead time {lead_time}...")
@@ -927,9 +899,6 @@ def main():
     lead_time_result = train_unet_individual_lead_time(
         outdir,
         model,
-        subgroup,
-        world_rank,
-        group_ranks,
         train_dataset,
         val_dataset,
         criterion,
@@ -957,13 +926,12 @@ def main():
     event("FORCE CLEANUP")
 
     # Wait for all processes before continuing to next lead time
-    if world_rank in group_ranks:
-        dist.barrier(group=subgroup, device_ids=[local_rank])
+    dist.barrier(device_ids=[local_rank])
 
     event("BARRIER - FORCE CLEANUP")
    
     # Only evaluate on rank 0 to avoid duplicate work
-    if world_rank == min(group_ranks):
+    if world_rank == 0:
         # Load the best model for this lead time
         best_model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
         best_model.load_state_dict(torch.load(f'{outdir}/checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth'))
@@ -1013,7 +981,7 @@ def main():
         metrics = calculate_metrics(test_truths, test_predictions)
         
         # Save results with output variable information (using your external function)
-        save_results(outdir, world_rank, dataset_name, lead_time, test_truths, test_predictions, metrics, 
+        save_results(outdir, dataset_name, lead_time, test_truths, test_predictions, metrics, 
                     output_variables)
 
         # Clean up
@@ -1027,17 +995,12 @@ def main():
     event("FINISHED LEADTIME")
 
     # Final synchronization
-    if world_rank in group_ranks:
-        dist.barrier(group=subgroup, device_ids=[local_rank])
+    dist.barrier(device_ids=[local_rank])
     event("BARRIER - FINISHED LEADTIME")
     
     if world_rank == 0:
         logger.info("\nIndividual Lead Time Training and Evaluation Complete!")
-        logger.info(f"Trained {len(lead_times)} separate models, one for each lead time.")
     
-    # memory snapshot
-    torch.cuda.memory._dump_snapshot(f"{outdir}/unet_memory_{world_rank}.pickle")
-
     # Clean up distributed process group
     dist.destroy_process_group()
 
@@ -1045,4 +1008,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
 

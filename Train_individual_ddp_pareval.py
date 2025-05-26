@@ -294,68 +294,68 @@ def calculate_metrics(truths, predictions, return_p_value=False):
     truths_proc = truths.copy()
     preds_proc = predictions.copy()
     
-    # Mean Squared Error
-    mse = np.mean((truths_proc - preds_proc) ** 2)
-    
-    # Mean Absolute Error
-    mae = np.mean(np.abs(truths_proc - preds_proc))
-    
-    # Root Mean Squared Error
-    rmse = np.sqrt(mse)
-    
-    # Pearson correlation coefficient
-    corr_coef, p_value = stats.pearsonr(truths_proc.ravel(), preds_proc.ravel())
-    
-    # Quantile RMSE calculations
-    s1, s2, s3 = 0.6827, 0.9545, 0.9973
-    s1rmse = quantile_rmse(preds_proc, truths_proc, s1)
-    s2rmse = quantile_rmse(preds_proc, truths_proc, s2)
-    s3rmse = quantile_rmse(preds_proc, truths_proc, s3)
-    
-    # RALSD calculation
-    ralsd = calc_RALSD(truths_proc, preds_proc)
-
-    # Calculate SSIM and PSNR using batched approach for memory efficiency
-    num_sam = truths.shape[0]
-    ssim_scores = np.zeros(num_sam)
-    psnr_values = np.zeros(num_sam)
-    
-    # Process in smaller batches to manage memory
-    batch_size = 64  # Adjust based on memory constraints
-    for i in range(0, num_sam, batch_size):
-        end_idx = min(i + batch_size, num_sam)
-        
-        for j in range(i, end_idx):
-
-            pred = preds_proc[j]
-            truth = truths_proc[j]
-
-            vmin = min(np.nanmin(pred), np.nanmin(truth))
-            vmax = max(np.nanmax(pred), np.nanmax(truth))
-
-            norm_pred = normalize(pred, vmax=vmax, vmin=vmin)
-            norm_truth = normalize(truth, vmax=vmax, vmin=vmin)
-
-            ssim_scores[j] = ssim(norm_truth, norm_pred)
-            psnr_values[j] = psnr(norm_truth, norm_pred)
-    
-    ssim_score = np.mean(ssim_scores)
-    psnr_value = np.mean(psnr_values)
-    
-    metrics = {
-        'MSE': mse,
-        'MAE': mae,
-        'RMSE': rmse,
-        'PSNR': psnr_value,
-        'CorrR': corr_coef,
-        'SSIM': ssim_score,
-        'RMSE_q0.6827': s1rmse,
-        'RMSE_q0.9545': s2rmse,
-        'RMSE_q0.9973': s3rmse,
-        'RALSD': ralsd
-    }
-    
-    return metrics
+#    # Mean Squared Error
+#    mse = np.mean((truths_proc - preds_proc) ** 2)
+#    
+#    # Mean Absolute Error
+#    mae = np.mean(np.abs(truths_proc - preds_proc))
+#    
+#    # Root Mean Squared Error
+#    rmse = np.sqrt(mse)
+#    
+#    # Pearson correlation coefficient
+#    corr_coef, p_value = stats.pearsonr(truths_proc.ravel(), preds_proc.ravel())
+#    
+#    # Quantile RMSE calculations
+#    s1, s2, s3 = 0.6827, 0.9545, 0.9973
+#    s1rmse = quantile_rmse(preds_proc, truths_proc, s1)
+#    s2rmse = quantile_rmse(preds_proc, truths_proc, s2)
+#    s3rmse = quantile_rmse(preds_proc, truths_proc, s3)
+#    
+#    # RALSD calculation
+#    ralsd = calc_RALSD(truths_proc, preds_proc)
+#
+#    # Calculate SSIM and PSNR using batched approach for memory efficiency
+#    num_sam = truths.shape[0]
+#    ssim_scores = np.zeros(num_sam)
+#    psnr_values = np.zeros(num_sam)
+#    
+#    # Process in smaller batches to manage memory
+#    batch_size = 64  # Adjust based on memory constraints
+#    for i in range(0, num_sam, batch_size):
+#        end_idx = min(i + batch_size, num_sam)
+#        
+#        for j in range(i, end_idx):
+#
+#            pred = preds_proc[j]
+#            truth = truths_proc[j]
+#
+#            vmin = min(np.nanmin(pred), np.nanmin(truth))
+#            vmax = max(np.nanmax(pred), np.nanmax(truth))
+#
+#            norm_pred = normalize(pred, vmax=vmax, vmin=vmin)
+#            norm_truth = normalize(truth, vmax=vmax, vmin=vmin)
+#
+#            ssim_scores[j] = ssim(norm_truth, norm_pred)
+#            psnr_values[j] = psnr(norm_truth, norm_pred)
+#    
+#    ssim_score = np.mean(ssim_scores)
+#    psnr_value = np.mean(psnr_values)
+#    
+#    metrics = {
+#        'MSE': mse,
+#        'MAE': mae,
+#        'RMSE': rmse,
+#        'PSNR': psnr_value,
+#        'CorrR': corr_coef,
+#        'SSIM': ssim_score,
+#        'RMSE_q0.6827': s1rmse,
+#        'RMSE_q0.9545': s2rmse,
+#        'RMSE_q0.9973': s3rmse,
+#        'RALSD': ralsd
+#    }
+#    
+#    return metrics
 
 
 def save_results(outdir, world_rank, dataset_name, lead_time, test_truths, test_predictions, metrics, 
@@ -394,8 +394,10 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Only print from rank 0 to avoid duplicate logs
-    print_memory_stats(world_rank, f"Start of train_unet for lead time {lead_time}")
-    logger.info(f"\n🔹 Rank{world_rank}: Training Model for Lead Time = {lead_time} hours")
+    if local_rank == 0:
+        print_memory_stats(local_rank, f"Start of train_unet for lead time {lead_time}")
+        #logger.info("We are using ", device)
+        logger.info(f"\n🔹 Training Model for Lead Time = {lead_time} hours")
     
     # Create distributed samplers
         #num_replicas=world_size,
@@ -481,8 +483,8 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
             batch_loss = loss.item()
             
             # Log every batch but only from rank 0
-            if world_rank == min(group_ranks):
-                logger.info(f"Rank{world_rank}: Lead Time {lead_time}, Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)}, "
+            if (batch_idx + 1) % 1 == 0 and local_rank == 0:
+                logger.info(f"  Lead Time {lead_time}, Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)}, "
                       f"Batch Loss: {batch_loss:.4f}")
 
             train_epoch_loss += batch_loss
@@ -533,34 +535,33 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
         val_losses.append(avg_val_loss)
         
         # Print progress (only from rank 0)
-        logger.info(f"Rank{world_rank}: Lead Time {lead_time}, Epoch {epoch+1}/{num_epochs}, "
-            f"Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
-        print_memory_stats(world_rank, f"End of epoch {epoch+1}")
+        if local_rank == 0:
+            logger.info(f"Lead Time {lead_time}, Epoch {epoch+1}/{num_epochs}, "
+                f"Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
+            print_memory_stats(local_rank, f"End of epoch {epoch+1}")
         
         # Early stopping logic (only save model from rank 0)
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             epochs_no_improve = 0
             
-            # Save best model from each subgroup
+            # Save best model from rank 0 only
+            #if local_rank == 0:
             if world_rank == min(group_ranks):
                 # Save the model state dict
                 torch.save(model.module.state_dict(), f'{outdir}/checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth')
         else:
             epochs_no_improve += 1
         
-        logger.info(f"Rank{world_rank}: BEFORE epochs_no_improve = {epochs_no_improve}")
         # Make sure all processes get the same decision on early stopping
         epochs_no_improve_tensor = torch.tensor([epochs_no_improve], device=device)
-        #dist.broadcast(epochs_no_improve_tensor, src=0)
-        # Broadcast only within the subgroup
-        dist.broadcast(epochs_no_improve_tensor, src=min(group_ranks), group=subgroup)
+        dist.broadcast(epochs_no_improve_tensor, src=0)
         epochs_no_improve = epochs_no_improve_tensor.item()
-        logger.info(f"Rank{world_rank}: AFTER epochs_no_improve = {epochs_no_improve}")
         
         # Early stopping condition
         if epochs_no_improve >= patience:
-            logger.info(f"Rank{world_rank}: Early stopping at epoch {epoch+1}")
+            if local_rank == 0:
+                logger.info(f"Early stopping at epoch {epoch+1}")
             break
         
         torch.cuda.empty_cache()
@@ -568,8 +569,7 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
 
         event("CALC AVG LOSS")
         # Wait for all processes to finish the epoch
-        if world_rank in group_ranks:
-            dist.barrier(group=subgroup, device_ids=[local_rank])
+        dist.barrier(device_ids=[local_rank])
         event("BARRIER - CALC AVG LOSS")
     
     return {
@@ -580,11 +580,14 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
     }
 
 def print_memory_stats(rank, location):
-    gpu_memory_allocated = torch.cuda.memory_allocated() / (1024 ** 3)
-    gpu_memory_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
-    logger.info(f"[rank{rank}:{location}] GPU Memory: Allocated={gpu_memory_allocated:.2f}GB, Reserved={gpu_memory_reserved:.2f}GB")
+    if rank == 0:
+        gpu_memory_allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+        gpu_memory_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+        logger.info(f"[{location}] GPU Memory: Allocated={gpu_memory_allocated:.2f}GB, Reserved={gpu_memory_reserved:.2f}GB")
 
-def evaluate_model(model, test_loader, device, target_stats=None):
+
+
+def evaluate_model(model, test_loader, device, world_rank, local_rank, target_stats=None):
     """
     Evaluate the model on test data and collect predictions
     
@@ -600,14 +603,16 @@ def evaluate_model(model, test_loader, device, target_stats=None):
     model.eval()
     all_truths = []
     all_predictions = []
-    
+
     with torch.no_grad():
         for batch_inputs, batch_targets in test_loader:
             batch_inputs = batch_inputs.to(device)
             batch_targets = batch_targets.cpu().numpy().squeeze(axis=1)
             
+            logger.info("BEFORE MODEL")
             # Move model predictions to CPU for numpy conversion
             outputs = model(batch_inputs).cpu().numpy().squeeze(axis=1)
+            logger.info("AFTER MODEL")
             
             all_truths.append(batch_targets)
             all_predictions.append(outputs)
@@ -616,9 +621,9 @@ def evaluate_model(model, test_loader, device, target_stats=None):
     all_truths = np.concatenate(all_truths, axis=0)
     all_predictions = np.concatenate(all_predictions, axis=0)
 
-    print ("Evaluation Shape:")
-    print ("Truth: ", all_truths.shape)
-    print ("Predictions: ", all_predictions.shape)
+    logger.info("Evaluation Shape:")
+    logger.info(f"Truth(local_rank={local_rank}, world_rank={world_rank}): {all_truths.shape}")
+    logger.info(f"Predictions(local_rank={local_rank}, world_rank={world_rank}): {all_predictions.shape}")
 
     event("EVAL PREDICT")
 
@@ -652,7 +657,11 @@ def main():
     world_size = int(os.environ['WORLD_SIZE'])
     world_rank = int(os.environ['RANK'])
     local_rank = int(os.environ['SLURM_LOCALID'])
-     
+ 
+#    os.environ['MIOPEN_USER_DB_PATH'] = f"/lustre/orion/scratch/grnydawn/cli190/tmp/miopen_cache_{world_rank}"
+#    os.makedirs(os.environ['MIOPEN_USER_DB_PATH'], exist_ok=True)
+#    os.environ['MIOPEN_DISABLE_CACHE'] = "0"
+    
     jobid = os.environ['SLURM_JOB_ID']
 
     logger = logging.getLogger(f"mylogger_{world_rank}")
@@ -737,8 +746,8 @@ def main():
     output_variables = ['t2m']
     
     # Define hyperparameters
-    num_epochs = 200
-    #num_epochs = 5 # for timing
+    #num_epochs = 200
+    num_epochs = 3 # for timing
     batch_size = args.batch_size  # Per-GPU batch size
     patience = 5
     base_channels = args.base_channels
@@ -792,9 +801,6 @@ def main():
         use_local_synchronization=True,
         backend="nccl"
     )
-
-    if group_id == 0:
-        patience -= 1
 
     event("BEGIN LEADTIME")
     if world_rank == 0:
@@ -923,29 +929,30 @@ def main():
     criterion = nn.MSELoss()  # Mean Squared Error Loss
     optimizer = optim.AdamW(model.parameters(), lr=5e-4)
     
-    # Train model for this lead time with DDP
-    lead_time_result = train_unet_individual_lead_time(
-        outdir,
-        model,
-        subgroup,
-        world_rank,
-        group_ranks,
-        train_dataset,
-        val_dataset,
-        criterion,
-        optimizer,
-        lead_time=lead_time,
-        dataset_name=dataset_name,
-        num_epochs=num_epochs,
-        batch_size=batch_size,
-        patience=patience,
-        device=device,
-        local_rank=local_rank,
-        world_size=world_size
-    )
-    
-    # Store results
-    all_lead_time_results[lead_time] = lead_time_result
+#### TEST
+#    # Train model for this lead time with DDP
+#    lead_time_result = train_unet_individual_lead_time(
+#        outdir,
+#        model,
+#        subgroup,
+#        world_rank,
+#        group_ranks,
+#        train_dataset,
+#        val_dataset,
+#        criterion,
+#        optimizer,
+#        lead_time=lead_time,
+#        dataset_name=dataset_name,
+#        num_epochs=num_epochs,
+#        batch_size=batch_size,
+#        patience=patience,
+#        device=device,
+#        local_rank=local_rank,
+#        world_size=world_size
+#    )
+#    
+#    # Store results
+#    all_lead_time_results[lead_time] = lead_time_result
 
     event("LEADTIME RESULT SAVED")
 
@@ -957,78 +964,97 @@ def main():
     event("FORCE CLEANUP")
 
     # Wait for all processes before continuing to next lead time
-    if world_rank in group_ranks:
-        dist.barrier(group=subgroup, device_ids=[local_rank])
+    dist.barrier(device_ids=[local_rank])
 
     event("BARRIER - FORCE CLEANUP")
    
     # Only evaluate on rank 0 to avoid duplicate work
-    if world_rank == min(group_ranks):
-        # Load the best model for this lead time
-        best_model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
-        best_model.load_state_dict(torch.load(f'{outdir}/checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth'))
-        best_model = best_model.to(device)
-        
-        # Reload test dataset
-        test_input_data = {}
-        with np.load(test_input_file) as data:
-            for var in input_variables:
-                if var in data:
-                    test_input_data[var] = data[var]
-        
-        test_target_data = {}
-        with np.load(test_target_file) as data:
-            for var in output_variables:
-                if var in data:
-                    test_target_data[var] = data[var]
+    #if world_rank == min(group_ranks):
+    # Load the best model for this lead time
+    best_model = ModelClass(in_channels=in_channels, out_channels=out_channels, num_blocks=5, base_channels=base_channels)
+    best_model.load_state_dict(torch.load(f'{outdir}/checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth'))
+    best_model = best_model.to(device)
+    subgroup2 = dist.new_group(
+        ranks=group_ranks,
+        use_local_synchronization=True,
+        backend="nccl"
+    )
 
-        test_dataset = BiasCorrectionDataset(
-            lead_time=lead_time,
-            input_variables=input_variables,
-            output_variables=output_variables,
-            input_data=test_input_data,
-            target_data=test_target_data,
-            input_stats=input_stats,
-            target_stats=target_stats
-        )
-        
-        test_loader = DataLoader(
-            test_dataset, 
-            batch_size=batch_size, 
-            shuffle=False,
-            num_workers=4
-        )
-        
-        event("LOAD EVAL DATA")
+    #best_model = DDP(best_model, device_ids=[local_rank], process_group=subgroup2, output_device=local_rank)
 
-        # Evaluate model on test data (with denormalization)
-        test_truths, test_predictions = evaluate_model(
-            best_model, 
-            test_loader, 
-            device,
-            target_stats=target_stats  # Pass stats for denormalization
-        )
-        
-        # Calculate metrics (using your external function)
-        metrics = calculate_metrics(test_truths, test_predictions)
-        
-        # Save results with output variable information (using your external function)
-        save_results(outdir, world_rank, dataset_name, lead_time, test_truths, test_predictions, metrics, 
-                    output_variables)
+    # Reload test dataset
+    test_input_data = {}
+    with np.load(test_input_file) as data:
+        for var in input_variables:
+            if var in data:
+                test_input_data[var] = data[var]
+    
+    test_target_data = {}
+    with np.load(test_target_file) as data:
+        for var in output_variables:
+            if var in data:
+                test_target_data[var] = data[var]
 
-        # Clean up
-        #del best_model, test_dataset, test_input_data, test_target_data
-        #gc.collect()
-        #torch.cuda.empty_cache()
+    test_dataset = BiasCorrectionDataset(
+        lead_time=lead_time,
+        input_variables=input_variables,
+        output_variables=output_variables,
+        input_data=test_input_data,
+        target_data=test_target_data,
+        input_stats=input_stats,
+        target_stats=target_stats
+    )
 
-        logger.info(f"Completed training and evaluation for lead time {lead_time}")
+    test_sampler = DistributedSampler(
+        test_dataset, 
+        num_replicas=len(group_ranks),
+        rank=local_rank,
+        shuffle=False,
+        drop_last=False
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size, 
+        shuffle=False,  # Don't shuffle - sampler does it
+        num_workers=1,
+        sampler=test_sampler,
+        pin_memory=False    # Speeds up GPU transfers
+    )
+    
+    event("LOAD EVAL DATA")
+
+    # Evaluate model on test data (with denormalization)
+    test_truths, test_predictions = evaluate_model(
+        best_model, 
+        test_loader, 
+        device,
+        world_rank,
+        local_rank,
+        target_stats=target_stats  # Pass stats for denormalization
+    )
+    
+    event("FINISHED EVAL PREDICTION")
+
+    # Calculate metrics (using your external function)
+    metrics = calculate_metrics(test_truths, test_predictions)
+    
+    # Save results with output variable information (using your external function)
+    #save_results(outdir, world_rank, dataset_name, lead_time, test_truths, test_predictions, metrics, 
+    #            output_variables)
+
+    # Clean up
+    #del best_model, test_dataset, test_input_data, test_target_data
+    #gc.collect()
+    #torch.cuda.empty_cache()
+
+    logger.info(f"Completed training and evaluation for lead time {lead_time}")
     event("FINISH EVAL")
     
     event("FINISHED LEADTIME")
 
     # Final synchronization
-    if world_rank in group_ranks:
-        dist.barrier(group=subgroup, device_ids=[local_rank])
+    dist.barrier(device_ids=[local_rank])
     event("BARRIER - FINISHED LEADTIME")
     
     if world_rank == 0:
@@ -1036,10 +1062,10 @@ def main():
         logger.info(f"Trained {len(lead_times)} separate models, one for each lead time.")
     
     # memory snapshot
-    torch.cuda.memory._dump_snapshot(f"{outdir}/unet_memory_{world_rank}.pickle")
+    #torch.cuda.memory._dump_snapshot(f"{outdir}/unet_memory_{world_rank}.pickle")
 
     # Clean up distributed process group
-    dist.destroy_process_group()
+    #dist.destroy_process_group()
 
     event("TRAINING END")
 

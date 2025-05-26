@@ -16,9 +16,13 @@ module load PrgEnv-gnu/8.6.0
 module load rocm/6.2.4
 module load craype-accel-amd-gfx90a
 
-export MIOPEN_USER_DB_PATH=/tmp/$JOBID
-mkdir -p $MIOPEN_USER_DB_PATH
-export MIOPEN_DISABLE_CACHE=1
+#export MIOPEN_USER_DB_PATH=/tmp/$JOBID
+#export MIOPEN_USER_DB_PATH=${MEMBERWORK}/cli190/tmp/miopen_cache
+#mkdir -p $MIOPEN_USER_DB_PATH
+#export MIOPEN_DISABLE_CACHE=1
+#export MIOPEN_DISABLE_CACHE=0
+
+#echo "Cache dir: ${MIOPEN_USER_DB_PATH}"
 
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=29500
@@ -28,6 +32,7 @@ export NCCL_IB_DISABLE=1
 #export NCCL_DEBUG=INFO
 NUM_NODES=4
 NUM_TASKS=32
+NUM_TRIES=20
 
 time srun -N ${NUM_NODES} --ntasks-per-node=8 -n ${NUM_TASKS} \
 	python Train_individual_ddp.py \
@@ -35,5 +40,5 @@ time srun -N ${NUM_NODES} --ntasks-per-node=8 -n ${NUM_TASKS} \
 		--batch_size 4 \
 		--model residual_unet_plus \
 		--dataset ResidualUNetPlusPlus \
-		--outdir "/lustre/orion/cli115/scratch/grnydawn/unet_par_${NUM_NODES}.1"
+		--outdir "/lustre/orion/cli115/scratch/grnydawn/unet_par.${NUM_NODES}.${NUM_TRIES}"
 

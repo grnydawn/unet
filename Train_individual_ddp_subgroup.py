@@ -1,9 +1,4 @@
 import os
-
-os.environ['MIOPEN_USER_DB_PATH'] = f"/lustre/orion/scratch/grnydawn/cli190/tmp/miopen_cache_{os.environ['SLURM_PROCID']}_{os.environ['SLURM_NTASKS']}"
-os.makedirs(os.environ['MIOPEN_USER_DB_PATH'], exist_ok=True)
-os.environ['MIOPEN_DISABLE_CACHE'] = "1"
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -394,8 +389,10 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Only print from rank 0 to avoid duplicate logs
-    print_memory_stats(world_rank, f"Start of train_unet for lead time {lead_time}")
-    logger.info(f"\n🔹 Rank{world_rank}: Training Model for Lead Time = {lead_time} hours")
+    if local_rank == 0:
+        print_memory_stats(local_rank, f"Start of train_unet for lead time {lead_time}")
+        #logger.info("We are using ", device)
+        logger.info(f"\n🔹 Training Model for Lead Time = {lead_time} hours")
     
     # Create distributed samplers
         #num_replicas=world_size,
@@ -481,8 +478,8 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
             batch_loss = loss.item()
             
             # Log every batch but only from rank 0
-            if world_rank == min(group_ranks):
-                logger.info(f"Rank{world_rank}: Lead Time {lead_time}, Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)}, "
+            if (batch_idx + 1) % 1 == 0 and local_rank == 0:
+                logger.info(f"  Lead Time {lead_time}, Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)}, "
                       f"Batch Loss: {batch_loss:.4f}")
 
             train_epoch_loss += batch_loss
@@ -533,34 +530,33 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
         val_losses.append(avg_val_loss)
         
         # Print progress (only from rank 0)
-        logger.info(f"Rank{world_rank}: Lead Time {lead_time}, Epoch {epoch+1}/{num_epochs}, "
-            f"Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
-        print_memory_stats(world_rank, f"End of epoch {epoch+1}")
+        if local_rank == 0:
+            logger.info(f"Lead Time {lead_time}, Epoch {epoch+1}/{num_epochs}, "
+                f"Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
+            print_memory_stats(local_rank, f"End of epoch {epoch+1}")
         
         # Early stopping logic (only save model from rank 0)
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             epochs_no_improve = 0
             
-            # Save best model from each subgroup
+            # Save best model from rank 0 only
+            #if local_rank == 0:
             if world_rank == min(group_ranks):
                 # Save the model state dict
                 torch.save(model.module.state_dict(), f'{outdir}/checkpoint/{dataset_name}/{dataset_name}_lead_time_{lead_time}_best.pth')
         else:
             epochs_no_improve += 1
         
-        logger.info(f"Rank{world_rank}: BEFORE epochs_no_improve = {epochs_no_improve}")
         # Make sure all processes get the same decision on early stopping
         epochs_no_improve_tensor = torch.tensor([epochs_no_improve], device=device)
-        #dist.broadcast(epochs_no_improve_tensor, src=0)
-        # Broadcast only within the subgroup
-        dist.broadcast(epochs_no_improve_tensor, src=min(group_ranks), group=subgroup)
+        dist.broadcast(epochs_no_improve_tensor, src=0)
         epochs_no_improve = epochs_no_improve_tensor.item()
-        logger.info(f"Rank{world_rank}: AFTER epochs_no_improve = {epochs_no_improve}")
         
         # Early stopping condition
         if epochs_no_improve >= patience:
-            logger.info(f"Rank{world_rank}: Early stopping at epoch {epoch+1}")
+            if local_rank == 0:
+                logger.info(f"Early stopping at epoch {epoch+1}")
             break
         
         torch.cuda.empty_cache()
@@ -568,8 +564,7 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
 
         event("CALC AVG LOSS")
         # Wait for all processes to finish the epoch
-        if world_rank in group_ranks:
-            dist.barrier(group=subgroup, device_ids=[local_rank])
+        dist.barrier(device_ids=[local_rank])
         event("BARRIER - CALC AVG LOSS")
     
     return {
@@ -580,9 +575,12 @@ def train_unet_individual_lead_time(outdir, model, subgroup, world_rank, group_r
     }
 
 def print_memory_stats(rank, location):
-    gpu_memory_allocated = torch.cuda.memory_allocated() / (1024 ** 3)
-    gpu_memory_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
-    logger.info(f"[rank{rank}:{location}] GPU Memory: Allocated={gpu_memory_allocated:.2f}GB, Reserved={gpu_memory_reserved:.2f}GB")
+    if rank == 0:
+        gpu_memory_allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+        gpu_memory_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+        logger.info(f"[{location}] GPU Memory: Allocated={gpu_memory_allocated:.2f}GB, Reserved={gpu_memory_reserved:.2f}GB")
+
+
 
 def evaluate_model(model, test_loader, device, target_stats=None):
     """
@@ -737,8 +735,8 @@ def main():
     output_variables = ['t2m']
     
     # Define hyperparameters
-    num_epochs = 200
-    #num_epochs = 5 # for timing
+    #num_epochs = 200
+    num_epochs = 3 # for timing
     batch_size = args.batch_size  # Per-GPU batch size
     patience = 5
     base_channels = args.base_channels
@@ -792,9 +790,6 @@ def main():
         use_local_synchronization=True,
         backend="nccl"
     )
-
-    if group_id == 0:
-        patience -= 1
 
     event("BEGIN LEADTIME")
     if world_rank == 0:
@@ -957,8 +952,7 @@ def main():
     event("FORCE CLEANUP")
 
     # Wait for all processes before continuing to next lead time
-    if world_rank in group_ranks:
-        dist.barrier(group=subgroup, device_ids=[local_rank])
+    dist.barrier(device_ids=[local_rank])
 
     event("BARRIER - FORCE CLEANUP")
    
@@ -1027,8 +1021,7 @@ def main():
     event("FINISHED LEADTIME")
 
     # Final synchronization
-    if world_rank in group_ranks:
-        dist.barrier(group=subgroup, device_ids=[local_rank])
+    dist.barrier(device_ids=[local_rank])
     event("BARRIER - FINISHED LEADTIME")
     
     if world_rank == 0:
