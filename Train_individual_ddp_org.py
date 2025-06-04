@@ -708,15 +708,16 @@ def main():
    
     # Define lead times
     #lead_times = [6, 12, 18, 24, 30, 36, 42, 48]
-    lead_times = [6] # for timing
+    lead_times = [6, 12, 18, 24]
+    #lead_times = [6] # for timing
     
     # Define input and output variables
     input_variables = ['mslp', 'u10', 'v10', 't2m', 'q2', 'd2m']
     output_variables = ['t2m']
     
     # Define hyperparameters
-    #num_epochs = 200
-    num_epochs = 1 # for timing
+    num_epochs = 200
+    #num_epochs = 1 # for timing
     batch_size = args.batch_size  # Per-GPU batch size
     patience = 5
     base_channels = args.base_channels

@@ -57,25 +57,35 @@ export PYTHONPATH=$PWD/../src:$PYTHONPATH
 
 #NUM_NODES="${SLURM_JOB_NUM_NODES}"
 #NUM_NODES=3
+NUM_TRIES=3
+
 for NUM_NODES in 1
 do
 
 NUM_TASKS=$((NUM_NODES*8))
 
+OUTDIR="/lustre/orion/cli115/scratch/grnydawn/unet_org_${NUM_NODES}.${NUM_TRIES}"
+mkdir $OUTDIR/energy_start
+mkdir $OUTDIR/energy_stop
+cp -rf /sys/cray/pm_counters/* $OUTDIR/energy_start
+
+
 #time srun --ntasks-per-node=8 -n $((SLURM_JOB_NUM_NODES*8)) \
 
 time srun -N ${NUM_NODES} --ntasks-per-node=8 -n ${NUM_TASKS} \
-	python Train_individual_ddp.py \
+	python Train_individual_ddp_org.py \
 		--base_channels 16 \
 		--batch_size 4 \
 		--model residual_unet_plus \
 		--dataset ResidualUNetPlusPlus \
-		--outdir "/lustre/orion/cli115/scratch/grnydawn/unet_org_${NUM_NODES}"
+		--outdir ${OUTDIR}
 
 #		--outdir "/lustre/orion/cli115/scratch/grnydawn/unet_${SLURM_JOB_NUM_NODES}"
 	#python Train_individual_ddp.py --base_channels 16 --batch_size 16 --model residual_unet_plus --dataset ResidualUNetPlusPlus
 
-mkdir -p logs/${NUM_NODES}
-mv logs/train* logs/${NUM_NODES}
+mkdir -p logs/${NUM_NODES}.${NUM_TRIES}
+mv logs/train* logs/${NUM_NODES}.${NUM_TRIES}
 
 done
+
+cp -rf /sys/cray/pm_counters/* $OUTDIR/energy_stop

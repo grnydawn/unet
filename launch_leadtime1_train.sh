@@ -36,13 +36,18 @@ export NCCL_IB_DISABLE=1
 #export NCCL_DEBUG=INFO
 NUM_NODES=4
 #NUM_TASKS=32
-NUM_TRIES=4
+NUM_TRIES=6
+
+OUTDIR="/lustre/orion/cli115/scratch/grnydawn/unet_leadtime.${NUM_NODES}.${NUM_TRIES}"
 
 pairs=(${MASTER_ADDR1} 6 ${MASTER_ADDR2} 12 ${MASTER_ADDR3} 18 ${MASTER_ADDR4} 24)
 
 for ((i=0; i<${#pairs[@]}; i+=2)); do
     MASTER_ADDR=${pairs[i]}
     LEAD_TIME=${pairs[i+1]}
+
+    mkdir -p ${OUTDIR}/${MASTER_ADDR}/energy_start
+    cp -rf /sys/cray/pm_counters/* $OUTDIR/${MASTER_ADDR}/energy_start
 
 	MASTER_ADDR=${MASTER_ADDR} LEAD_TIME=${LEAD_TIME} time srun -N 1 --ntasks-per-node=8 -n 8 \
 	python Train_individual_ddp_leadtime1.py \
@@ -51,7 +56,7 @@ for ((i=0; i<${#pairs[@]}; i+=2)); do
 		--batch_size 4 \
 		--model residual_unet_plus \
 		--dataset ResidualUNetPlusPlus \
-		--outdir "/lustre/orion/cli115/scratch/grnydawn/unet_leadtime.${NUM_NODES}.${NUM_TRIES}" &
+		--outdir ${OUTDIR} &
 done
 
 #MASTER_ADDR=${MASTER_ADDR1} LEAD_TIME=6 time srun -N 1 --ntasks-per-node=8 -n 8 \
@@ -91,3 +96,11 @@ done
 #		--outdir "/lustre/orion/cli115/scratch/grnydawn/unet_leadtime.${NUM_NODES}.${NUM_TRIES}" &
 
 wait
+
+for ((i=0; i<${#pairs[@]}; i+=2)); do
+    MASTER_ADDR=${pairs[i]}
+
+    mkdir -p ${OUTDIR}/${MASTER_ADDR}/energy_stop
+    cp -rf /sys/cray/pm_counters/* $OUTDIR/${MASTER_ADDR}/energy_stop
+
+done
