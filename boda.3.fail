@@ -1,0 +1,111 @@
+#!/lustre/orion/cli115/proj-shared/grnydawn/repos/github/unet/venv/bin/python3
+
+import sys
+import runpy
+import importlib
+from importlib import abc
+import importlib.util
+import traceback
+from pathlib import Path
+import tempfile
+import shutil
+import types
+
+used_modules = {}
+temp_dir = tempfile.mkdtemp(prefix="boda_modified_")
+
+def is_user_file(path: Path) -> bool:
+    """Return True if path is a regular user .py file (not built-in, not .so/.pyc)."""
+    try:
+        path = path.resolve()
+        return path.suffix == ".py" and path.exists() and "site-packages" not in str(path)
+    except Exception:
+        return False
+
+def maybe_modify_file(original_path: Path) -> Path:
+    """If the file contains #@boda lines, return a path to a modified temp copy; else return original."""
+    try:
+        with open(original_path, 'r') as f:
+            lines = f.readlines()
+    except Exception:
+        return original_path
+
+    modified = False
+    new_lines = []
+    for line in lines:
+        if line.strip().startswith("#@boda"):
+            modified = True
+            new_lines.append(line.replace("#@boda", "#@boda replaced"))
+        else:
+            new_lines.append(line)
+
+    if modified:
+        temp_file_path = Path(temp_dir) / original_path.name
+        with open(temp_file_path, 'w') as f:
+            f.writelines(new_lines)
+        return temp_file_path
+
+    return original_path
+
+class TrackImportsLoader(abc.Loader):
+    def __init__(self, origin_path: Path, fullname: str):
+        self.fullname = fullname
+        self.origin_path = origin_path
+
+    def create_module(self, spec):
+        return None  # Use default module creation
+
+    def exec_module(self, module: types.ModuleType):
+        if self.origin_path in used_modules:
+            path_to_use = used_modules[self.origin_path]
+        else:
+            path_to_use = maybe_modify_file(self.origin_path)
+            used_modules[self.origin_path] = path_to_use
+
+        with open(path_to_use, 'r') as f:
+            source = f.read()
+        code = compile(source, str(path_to_use), 'exec')
+        exec(code, module.__dict__)
+
+class TrackImportsFinder(abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        try:
+            spec = importlib.util.find_spec(fullname)
+            if not spec or not spec.origin or not spec.origin.endswith(".py"):
+                return None
+
+            origin_path = Path(spec.origin).resolve()
+            if is_user_file(origin_path):
+                return importlib.util.spec_from_loader(fullname, TrackImportsLoader(origin_path, fullname))
+
+            return None
+        except Exception:
+            return None
+
+def main(script_path):
+    script_path = Path(script_path).resolve()
+    sys.path.insert(0, str(script_path.parent))
+    sys.meta_path.insert(0, TrackImportsFinder())
+
+    try:
+        runpy.run_path(str(script_path), run_name="__main__")
+    except Exception:
+        print("Error during execution of the script:")
+        traceback.print_exc()
+    finally:
+        print("\nUsed Python files (modified if needed):")
+        for orig, mod in sorted(used_modules.items()):
+            if orig != mod:
+                print(f"{orig} -> MODIFIED")
+            else:
+                print(f"{orig}")
+
+        # Uncomment if you want to clean up temp files afterward
+        # shutil.rmtree(temp_dir)
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: python track_imports.py <script_to_run.py>")
+        sys.exit(1)
+    main(sys.argv[1])
+
