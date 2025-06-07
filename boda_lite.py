@@ -18,16 +18,57 @@ boda_module_name = "bodalitemodule"
 boda_pat_v0 = re.compile(r"^(\s*)#@boda\s+(\w+)(.*)$", re.MULTILINE)
 
 boda_module = '''\
+import threading
+import struct
+import time
+import pickle
+import os
 import torch
+
+RECORD_STRUCT = struct.Struct('f3d')
+
+res_lock = threading.Lock()
+res_map = dict()
+
+rec_lock = threading.Lock()
+records = bytearray()
+
+rec_file_path = "{rec_file_path}"
+res_file_path = "{res_file_path}"
+
+maxsize_inbytes = {maxsize_inbytes}
+
+def flush_record():
+    with rec_lock:
+        if len(records) > 0:
+            with open(rec_file_path, 'ab') as f:
+                f.write(records)
+            records.clear()
+
+    with open(res_file_path, 'wb') as f:
+        pickle.dump(res_map, f)
+
+def add_record(label: str):
+    ts = time.time()
+    if label not in res_map:
+        with res_lock:
+            res_map[label] = len(res_map)
+    
+    with rec_lock:
+        records.extend(RECORD_STRUCT.pack(
+            ts, os.getpid(), threading.get_ident(), res_map[label]))
+
+        if len(records) > maxsize_inbytes:
+            flush_record()
 
 def _boda_profile_start():
     print("profile start")
 
 def _boda_profile_stop():
-    print("profile stop")
+    flush_record()
 
-def _boda_profile_event():
-    print("collect event")
+def _boda_profile_event(label=""):
+    add_record(label)
 '''
 
 
@@ -44,18 +85,17 @@ def modify_script(original_path, tmp_dir) -> str:
     new_content = ""
     for match in boda_pat_v0.finditer(content):
         start, stop = match.span()
-        indent, command, _ = match.groups()
+        indent, command, args = match.groups()
         new_content += content[pointer:start]
         if command == "start":
-            new_content += f"{indent}{boda_module_name}._boda_profile_start()\n"
+            new_content += f"{indent}{boda_module_name}._boda_profile_start({args})\n"
         elif command == "stop":
-            new_content += f"{indent}{boda_module_name}._boda_profile_stop()\n"
+            new_content += f"{indent}{boda_module_name}._boda_profile_stop({args})\n"
         elif command == "event":
-            new_content += f"{indent}{boda_module_name}._boda_profile_event()\n"
+            new_content += f"{indent}{boda_module_name}._boda_profile_event({args})\n"
 
         pointer = stop
 
-    
     if pointer > 0:
         new_content += content[pointer:]
         new_content = f"import {boda_module_name}\n" + new_content
@@ -126,13 +166,21 @@ def parse_arguments():
 
     return args
 
-def create_boda_module(tmpdir):
+def create_boda_module(args):
 
-    path = Path(tmpdir) / f"{boda_module_name}.py"
+    path = Path(args.boda_tmpdir) / f"{boda_module_name}.py"
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    rec_file_path = os.path.join(args.boda_outdir, "records.boda")
+    res_file_path = os.path.join(args.boda_outdir, "resource.bpkl")
+    maxsize_inbytes = 1000
+
     with open(path, 'w') as f:
-        f.write(boda_module)
+        f.write(boda_module.format(
+            rec_file_path=rec_file_path,
+            res_file_path=res_file_path,
+            maxsize_inbytes=maxsize_inbytes)
+        )
 
     return path
 
@@ -148,7 +196,7 @@ def instrument_code(args, modpath):
 def instrument(args):
 
     # create boda module
-    boda_module_path = create_boda_module(args.boda_tmpdir)
+    boda_module_path = create_boda_module(args)
 
     # instrument
     script_path = instrument_code(args, boda_module_path)
