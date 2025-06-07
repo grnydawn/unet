@@ -4,5 +4,6 @@
 from target_script3 import test
 
 if __name__ == "__main__":
-    #@boda XXY
+    #@boda start  
     test()
+    #@boda stop  

@@ -1,5 +1,8 @@
+# boda_lite.py
 
 import sys
+import os
+import re
 import runpy
 import argparse
 import importlib
@@ -10,99 +13,122 @@ from pathlib import Path
 import tempfile
 import shutil
 
+boda_module_name = "bodalitemodule"
+
+boda_pat_v0 = re.compile(r"^(\s*)#@boda\s+(\w+)(.*)$", re.MULTILINE)
+
 boda_module = '''\
 import torch
+
+def _boda_profile_start():
+    print("profile start")
+
+def _boda_profile_stop():
+    print("profile stop")
+
+def _boda_profile_event():
+    print("collect event")
 '''
-def modify_script(original_path, temp_dir) -> str:
+
+
+def modify_script(original_path, tmp_dir) -> str:
 
     # Check for #@boda lines
     try:
         with open(original_path, 'r') as f:
-            lines = f.readlines()
+            content = f.read()
     except Exception:
         return None
 
-    modified = False
-    modified_lines = []
-    for line in lines:
-        stripped = line.lstrip()
-        if stripped.startswith("#@boda"):
-            modified = True
-            leading_spaces = line[:len(line) - len(stripped)]
-            modified_lines.append(f"{leading_spaces}#XXX\n")
-            modified_lines.append(f"{leading_spaces}#replaced\n")
-            print(f"FOUND at {original_path}.")
-        else:
-            modified_lines.append(line)
+    pointer = 0
+    new_content = ""
+    for match in boda_pat_v0.finditer(content):
+        start, stop = match.span()
+        indent, command, _ = match.groups()
+        new_content += content[pointer:start]
+        if command == "start":
+            new_content += f"{indent}{boda_module_name}._boda_profile_start()\n"
+        elif command == "stop":
+            new_content += f"{indent}{boda_module_name}._boda_profile_stop()\n"
+        elif command == "event":
+            new_content += f"{indent}{boda_module_name}._boda_profile_event()\n"
 
-    if modified:
-        inserted = False
-        for idx in range(len(modified_lines)):
-            stripped = modified_lines[idx].lstrip()
-            if stripped and not stripped.startswith("#"):
-                inserted = True
-                modified_lines.insert(idx, "import bodalitemodule\n")
-                break
-        
-        if not inserted:
-            modified_lines.insert(0, "import bodalitemodule")
+        pointer = stop
 
-        # Write to a temporary modified file
+    
+    if pointer > 0:
+        new_content += content[pointer:]
+        new_content = f"import {boda_module_name}\n" + new_content
+
         # TODO: handle two common name files
-        temp_file_path = Path(temp_dir) / original_path.name
-        with open(temp_file_path, 'w') as f:
-            f.writelines(modified_lines)
-        return temp_file_path
+        tmp_file_path = Path(tmp_dir) / ("boda_" + original_path.name)
+        with open(tmp_file_path, 'w') as f:
+            f.write(new_content)
+        print(f"MODIFIED from {original_path} to {tmp_file_path}")
+        return tmp_file_path
 
     return original_path
 
 class TrackImportsFinder(abc.MetaPathFinder):
 
-    def __init__(self, temp_dir):
-        self.temp_dir = temp_dir
+    def __init__(self, tmp_dir):
+        super().__init__()
+        self.tmp_dir = tmp_dir
         self.used_modules = {}
 
     def find_spec(self, fullname, path, target=None):
         try:
-            spec = importlib.util.find_spec(fullname)
+            # Temporarily remove this finder to avoid recursion
+            sys.meta_path.remove(self)
+            try:
+                spec = importlib.util.find_spec(fullname)
+            finally:
+                sys.meta_path.insert(0, self)  # Add it back
             if spec and spec.origin and spec.origin.endswith(".py"):
                 original_path = Path(spec.origin).resolve()
 
                 if original_path in self.used_modules:
-                    return None  # Already processed
+                    return spec  # Already processed
 
-                new_path = modify_script(original_path, self.temp_dir)
+                new_path = modify_script(original_path, self.tmp_dir)
                 if new_path == original_path:
                     self.used_modules[original_path] = original_path
                 else:
                     self.used_modules[original_path] = new_path
                     spec = importlib.util.spec_from_file_location(fullname, new_path)
-                    print(f"{original_path} -> MODIFIED({new_path})")
-
+                    print(f"NEW SPEC from {original_path} to {new_path}")
                 return spec
-
             return None
-        except Exception:
+        except Exception as e:
             return None
 
 
 def parse_arguments():
 
     parser = argparse.ArgumentParser(description="boda_lite.py")
-    parser.add_argument("--boda-tempdir", type=str, help="Temporary directory for boda")
+    parser.add_argument("--boda-tmpdir", type=str, help="Temporary working directory")
+    parser.add_argument("--boda-outdir", type=str, default=".", help="Output directory")
     parser.add_argument("target_script", type=str, help="Python script to run")
     parser.add_argument("target_args", nargs=argparse.REMAINDER, help="Args for target script")
 
     args = parser.parse_args()
 
-    if args.boda_tempdir is None:
-        args.boda_tempdir = tempfile.mkdtemp(prefix="bodalite_")
+    if args.boda_tmpdir is None:
+        args.boda_tmpdir = tempfile.mkdtemp(prefix="bodalite_")
+
+    args.boda_outdir = os.path.abspath(args.boda_outdir)
+
+    if not os.path.isdir(args.boda_outdir):
+        os.mkdir(args.boda_outdir)
+
+    print(f"TMPDIR: {args.boda_tmpdir}")
+    print(f"OUTDIR: {args.boda_outdir}")
 
     return args
 
-def create_boda_module(tempdir):
+def create_boda_module(tmpdir):
 
-    path = Path(tempdir) / "bodalitemodule.py"
+    path = Path(tmpdir) / f"{boda_module_name}.py"
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, 'w') as f:
@@ -113,16 +139,16 @@ def create_boda_module(tempdir):
 
 def instrument_code(args, modpath):
 
-    script_path = modify_script(Path(args.target_script).resolve(), args.boda_tempdir)
+    script_path = modify_script(Path(args.target_script).resolve(), args.boda_tmpdir)
     sys.path.insert(0, str(script_path.parent))
-    sys.meta_path.insert(0, TrackImportsFinder(args.boda_tempdir))
+    sys.meta_path.insert(0, TrackImportsFinder(args.boda_tmpdir))
 
     return script_path
 
 def instrument(args):
 
     # create boda module
-    boda_module_path = create_boda_module(args.boda_tempdir)
+    boda_module_path = create_boda_module(args.boda_tmpdir)
 
     # instrument
     script_path = instrument_code(args, boda_module_path)
@@ -178,8 +204,8 @@ def main():
         #        print(f"{orig} -> MODIFIED")
         #    else:
         #        print(f"{orig}")
-        ## Optionally, remove temp_dir after use
-        #shutil.rmtree(temp_dir)
+        ## Optionally, remove tmp_dir after use
+        #shutil.rmtree(tmp_dir)
 
 if __name__ == "__main__":
     main()
