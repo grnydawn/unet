@@ -5,6 +5,8 @@ import os
 import re
 import runpy
 import argparse
+import json
+import tarfile
 import importlib
 import importlib.util
 from importlib import abc
@@ -14,58 +16,101 @@ import tempfile
 import shutil
 
 boda_module_name = "bodalitemodule"
-
+boda_record_struct = "fd"
 boda_pat_v0 = re.compile(r"^(\s*)#@boda\s+(\w+)(.*)$", re.MULTILINE)
 
 boda_module = '''\
 import threading
 import struct
 import time
-import pickle
+import json
 import os
+import socket
+import tarfile
 import torch
 
-RECORD_STRUCT = struct.Struct('f3d')
+RECORD_STRUCT = struct.Struct('{recstruct}')
 
 res_lock = threading.Lock()
 res_map = dict()
 
 rec_lock = threading.Lock()
-records = bytearray()
-
-rec_file_path = "{rec_file_path}"
-res_file_path = "{res_file_path}"
+rec_map = dict()
 
 maxsize_inbytes = {maxsize_inbytes}
 
-def flush_record():
-    with rec_lock:
-        if len(records) > 0:
-            with open(rec_file_path, 'ab') as f:
-                f.write(records)
-            records.clear()
+def flush_record(records, rec_path, res_path):
+    if len(records) > 0:
+        with open(rec_path, 'ab') as f:
+            f.write(records)
+        records.clear()
 
-    with open(res_file_path, 'wb') as f:
-        pickle.dump(res_map, f)
+    with res_lock:
+        with open(res_path, "w") as f:
+            rpath = os.path.relpath(rec_path, os.path.dirname(res_path))
+            res_map["file"][rpath] = -1 # value is reserved for futher use
+            json.dump(res_map, f, indent=2)
 
 def add_record(label: str):
     ts = time.time()
-    if label not in res_map:
+    if label not in res_map["labels"]:
         with res_lock:
-            res_map[label] = len(res_map)
+            if label not in res_map["labels"]:
+                res_map["labels"][label] = len(res_map["labels"])
     
-    with rec_lock:
-        records.extend(RECORD_STRUCT.pack(
-            ts, os.getpid(), threading.get_ident(), res_map[label]))
-
-        if len(records) > maxsize_inbytes:
-            flush_record()
+    tid = threading.get_ident()
+    records = rec_map[tid]
+    records.extend(RECORD_STRUCT.pack(ts, res_map["labels"][label]))
+    if len(records) > maxsize_inbytes:
+        flush_record(records, rec_map["rec_path"][tid], rec_map["res_path"])
 
 def _boda_profile_start():
-    print("profile start")
+
+    hostname = socket.gethostname()
+    pid = os.getpid()
+
+    with res_lock:
+        tid = threading.get_ident()
+        if "tid" not in res_map:
+            res_map["tid"] = dict()
+
+        res_map["tid"][tid] = len(res_map["tid"])
+
+        if "file" not in res_map:
+            res_map["file"] = dict()
+
+        if "res_path" not in rec_map:
+            rec_map["res_path"] = os.path.join("{outdir}", f"bodadata.{{hostname}}.{{pid}}.res")
+
+        if "labels" not in res_map:
+            res_map["labels"] = dict()
+
+    with rec_lock:
+        tid = threading.get_ident()
+        rec_map[tid] = bytearray()
+        if "rec_path" not in rec_map:
+            rec_map["rec_path"] = dict()
+
+        if tid not in rec_map["rec_path"]:
+            _t = res_map['tid'][tid]
+            rec_map["rec_path"][tid] = os.path.join("{outdir}", f"bodadata.{{hostname}}.{{pid}}.{{_t}}.rec")
 
 def _boda_profile_stop():
-    flush_record()
+    tid = threading.get_ident()
+    flush_record(rec_map[tid], rec_map["rec_path"][tid], rec_map["res_path"])
+    
+    if threading.current_thread() == threading.main_thread():
+
+        with tarfile.open("{bodafile}", 'w:gz') as tar:
+            for file in rec_map["rec_path"].values():
+                filename_only = os.path.basename(file)
+                tar.add(file, arcname=filename_only)
+            filename_only = os.path.basename(rec_map["res_path"])
+            tar.add(rec_map["res_path"], filename_only)
+
+        for file in rec_map["rec_path"].values():
+            os.remove(file)
+        os.remove(rec_map["res_path"])
 
 def _boda_profile_event(label=""):
     add_record(label)
@@ -78,7 +123,8 @@ def modify_script(original_path, tmp_dir) -> str:
     try:
         with open(original_path, 'r') as f:
             content = f.read()
-    except Exception:
+    except Exception as e:
+        import pdb; pdb.set_trace()
         return None
 
     pointer = 0
@@ -143,13 +189,20 @@ class TrackImportsFinder(abc.MetaPathFinder):
             return None
 
 
+def _make_list(value):
+    if not value:
+        return []
+    return [v.strip() for v in value.split(',') if v.strip()]
+
 def parse_arguments():
 
     parser = argparse.ArgumentParser(description="boda_lite.py")
     parser.add_argument("--boda-tmpdir", type=str, help="Temporary working directory")
-    parser.add_argument("--boda-outdir", type=str, default=".", help="Output directory")
-    parser.add_argument("target_script", type=str, help="Python script to run")
-    parser.add_argument("target_args", nargs=argparse.REMAINDER, help="Args for target script")
+    parser.add_argument("--boda-outdir", type=str, default="boda_output", help="Output directory")
+    parser.add_argument("--boda-files",  type=_make_list, default=[], help="Boda files")
+    parser.add_argument("--boda-maxsize",type=int, default=int(1E6), help="Maximum record file size")
+    parser.add_argument("target_script", type=str, nargs="?", help="Python script to run")
+    parser.add_argument("target_args",   nargs=argparse.REMAINDER, help="Args for target script")
 
     args = parser.parse_args()
 
@@ -159,7 +212,7 @@ def parse_arguments():
     args.boda_outdir = os.path.abspath(args.boda_outdir)
 
     if not os.path.isdir(args.boda_outdir):
-        os.mkdir(args.boda_outdir)
+        os.makedirs(args.boda_outdir, exist_ok=True)
 
     print(f"TMPDIR: {args.boda_tmpdir}")
     print(f"OUTDIR: {args.boda_outdir}")
@@ -169,18 +222,19 @@ def parse_arguments():
 def create_boda_module(args):
 
     path = Path(args.boda_tmpdir) / f"{boda_module_name}.py"
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    rec_file_path = os.path.join(args.boda_outdir, "records.boda")
-    res_file_path = os.path.join(args.boda_outdir, "resource.bpkl")
-    maxsize_inbytes = 1000
 
     with open(path, 'w') as f:
+        boda_file = os.path.join(args.boda_outdir,
+                    os.path.splitext(os.path.basename(args.target_script))[0] +
+                    ".boda")
+
         f.write(boda_module.format(
-            rec_file_path=rec_file_path,
-            res_file_path=res_file_path,
-            maxsize_inbytes=maxsize_inbytes)
-        )
+            outdir=args.boda_outdir,
+            bodafile=boda_file,
+            recstruct=boda_record_struct,
+            maxsize_inbytes=args.boda_maxsize))
+
+        args.boda_files.append(boda_file)
 
     return path
 
@@ -203,15 +257,38 @@ def instrument(args):
 
     return script_path
 
-def collect_events():
-    pass
+def collect_events(args):
+
+    boda_res_files = []
+
+    for idx, boda_file in enumerate(args.boda_files):
+        if tarfile.is_tarfile(boda_file):
+            tmpdir = os.path.join(args.boda_tmpdir, f"tmpboda_{idx}") 
+            with tarfile.open(boda_file, 'r:gz') as tar:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+                os.makedirs(tmpdir)
+                tar.extractall(path=tmpdir)
+            for f in Path(tmpdir).iterdir():
+                if f.is_file() and f.name.endswith(".res"):
+                    boda_res_files.append(f)
+        else:
+            boda_res_files.append(boda_file)
+
+    for boda_res_file in boda_res_files:
+        try:
+            with open(boda_res_file, "r") as f:
+                resdir = os.path.dirname(boda_res_file)
+                data = json.load(f)
+                import pdb; pdb.set_trace()
+        except (json.JSONDecodeError, OSError):
+            pass
 
 def generate_report():
     pass
 
 def analyze(args):
 
-    collect_events()
+    collect_events(args)
 
     generate_report()
 
@@ -221,18 +298,20 @@ def main():
     # parse command-line arguments
     args = parse_arguments()
 
-    # instrument script
-    script_path = instrument(args)
-
     # run instrumented code
     try:
-        # Save original argv
-        original_argv = sys.argv.copy()
 
-        # Set sys.argv to simulate running the target script
-        sys.argv = [args.target_script] + args.target_args
+        if args.target_script:
+            # instrument script
+            script_path = instrument(args)
 
-        runpy.run_path(str(script_path), run_name="__main__")
+            # Save original argv
+            original_argv = sys.argv.copy()
+
+            # Set sys.argv to simulate running the target script
+            sys.argv = [args.target_script] + args.target_args
+
+            runpy.run_path(str(script_path), run_name="__main__")
 
     except Exception:
         print("Error during execution of the script:")
@@ -246,13 +325,6 @@ def main():
         # generate analysis report
         analyze(args)
 
-        #print("\nUsed Python files:")
-        #for orig, mod in used_modules.items():
-        #    if orig != mod:
-        #        print(f"{orig} -> MODIFIED")
-        #    else:
-        #        print(f"{orig}")
-        ## Optionally, remove tmp_dir after use
         #shutil.rmtree(tmp_dir)
 
 if __name__ == "__main__":

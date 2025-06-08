@@ -177,3 +177,5 @@ cython_debug/
 Results
 checkpoint
 *.png
+boda_output
+*.boda
