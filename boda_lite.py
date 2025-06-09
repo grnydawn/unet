@@ -5,6 +5,7 @@ import os
 import re
 import runpy
 import argparse
+import struct
 import json
 import tarfile
 import importlib
@@ -16,7 +17,8 @@ import tempfile
 import shutil
 
 boda_module_name = "bodalitemodule"
-boda_record_struct = "fd"
+boda_record_struct = "fi"
+RECORD_STRUCT = struct.Struct(boda_record_struct)
 boda_pat_v0 = re.compile(r"^(\s*)#@boda\s+(\w+)(.*)$", re.MULTILINE)
 
 boda_module = '''\
@@ -55,12 +57,13 @@ def add_record(label: str):
     ts = time.time()
     if label not in res_map["labels"]:
         with res_lock:
+            label_id = len(res_map["labels"])
             if label not in res_map["labels"]:
-                res_map["labels"][label] = len(res_map["labels"])
+                res_map["labels"][label_id] = label
     
     tid = threading.get_ident()
     records = rec_map[tid]
-    records.extend(RECORD_STRUCT.pack(ts, res_map["labels"][label]))
+    records.extend(RECORD_STRUCT.pack(ts, label_id))
     if len(records) > maxsize_inbytes:
         flush_record(records, rec_map["rec_path"][tid], rec_map["res_path"])
 
@@ -257,6 +260,19 @@ def instrument(args):
 
     return script_path
 
+
+def load_rec_file(rec_file, resdir, label_map):
+
+    rec_path = rec_file if os.path.isabs(rec_file) else os.path.abspath(os.path.join(resdir, rec_file))
+    data = []
+
+    with open(rec_path, 'rb') as f:
+        while chunk := f.read(RECORD_STRUCT.size):
+            ts, label_id = RECORD_STRUCT.unpack(chunk)
+            data.append((ts, label_map[label_id]))
+
+    return data
+
 def collect_events(args):
 
     boda_res_files = []
@@ -274,22 +290,29 @@ def collect_events(args):
         else:
             boda_res_files.append(boda_file)
 
+    boda_data = []
     for boda_res_file in boda_res_files:
         try:
             with open(boda_res_file, "r") as f:
                 resdir = os.path.dirname(boda_res_file)
                 data = json.load(f)
-                import pdb; pdb.set_trace()
+                data["labels"] = {int(k): v for k, v in data["labels"].items()}
+                boda_data.append(data)
+                for rec_file in data['file'].keys():
+                    data['file'][rec_file] = load_rec_file(rec_file, resdir, data["labels"])
         except (json.JSONDecodeError, OSError):
             pass
+
+    return boda_data
 
 def generate_report():
     pass
 
 def analyze(args):
 
-    collect_events(args)
+    data = collect_events(args)
 
+    import pdb; pdb.set_trace()
     generate_report()
 
 
