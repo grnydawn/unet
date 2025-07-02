@@ -8,12 +8,16 @@ import argparse
 import struct
 import json
 import tarfile
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib import cm
 import importlib
 import importlib.util
 from importlib import abc
 import traceback
 from pathlib import Path
 import tempfile
+import statistics
 import shutil
 
 boda_module_name = "bodalitemodule"
@@ -54,7 +58,7 @@ def flush_record(records, rec_path, res_path):
             json.dump(res_map, f, indent=2)
 
 def add_record(label: str):
-    ts = time.time()
+    ts = time.perf_counter()
     if label not in res_map["labels"]:
         with res_lock:
             label_id = len(res_map["labels"])
@@ -69,10 +73,22 @@ def add_record(label: str):
 
 def _boda_profile_start():
 
-    hostname = socket.gethostname()
+    host = socket.gethostname()
     pid = os.getpid()
 
     with res_lock:
+        if "host" not in res_map:
+            res_map["host"] = dict()
+
+        host_id = len(res_map["host"])
+        res_map["host"][host_id] = host
+
+        if "pid" not in res_map:
+            res_map["pid"] = dict()
+
+        pid_id = len(res_map["pid"])
+        res_map["pid"][pid_id] = pid
+
         tid = threading.get_ident()
         if "tid" not in res_map:
             res_map["tid"] = dict()
@@ -83,7 +99,7 @@ def _boda_profile_start():
             res_map["file"] = dict()
 
         if "res_path" not in rec_map:
-            rec_map["res_path"] = os.path.join("{outdir}", f"bodadata.{{hostname}}.{{pid}}.res")
+            rec_map["res_path"] = os.path.join("{outdir}", f"boda.{{host_id}}.{{pid_id}}.res")
 
         if "labels" not in res_map:
             res_map["labels"] = dict()
@@ -96,9 +112,14 @@ def _boda_profile_start():
 
         if tid not in rec_map["rec_path"]:
             _t = res_map['tid'][tid]
-            rec_map["rec_path"][tid] = os.path.join("{outdir}", f"bodadata.{{hostname}}.{{pid}}.{{_t}}.rec")
+            rec_map["rec_path"][tid] = os.path.join("{outdir}", f"boda.{{host_id}}.{{pid_id}}.{{_t}}.rec")
+
+    add_record("START")
 
 def _boda_profile_stop():
+
+    add_record("STOP")
+
     tid = threading.get_ident()
     flush_record(rec_map[tid], rec_map["rec_path"][tid], rec_map["res_path"])
     
@@ -261,15 +282,13 @@ def instrument(args):
     return script_path
 
 
-def load_rec_file(rec_file, resdir, label_map):
-
-    rec_path = rec_file if os.path.isabs(rec_file) else os.path.abspath(os.path.join(resdir, rec_file))
+def load_rec_file(rec_path):
     data = []
 
     with open(rec_path, 'rb') as f:
         while chunk := f.read(RECORD_STRUCT.size):
             ts, label_id = RECORD_STRUCT.unpack(chunk)
-            data.append((ts, label_map[label_id]))
+            data.append((ts, label_id))
 
     return data
 
@@ -297,23 +316,149 @@ def collect_events(args):
                 resdir = os.path.dirname(boda_res_file)
                 data = json.load(f)
                 data["labels"] = {int(k): v for k, v in data["labels"].items()}
+                data["path"] = {}
                 boda_data.append(data)
-                for rec_file in data['file'].keys():
-                    data['file'][rec_file] = load_rec_file(rec_file, resdir, data["labels"])
+                filekeys = list(data['file'].keys())
+                for rec_file in filekeys:
+                    rec_path = rec_file if os.path.isabs(rec_file) else os.path.abspath(os.path.join(resdir, rec_file))
+                    rec_filename_parts = os.path.basename(rec_file).split(".")
+                    path_id = tuple(int(p) for p in rec_filename_parts[1:4])
+                    data['path'][path_id] = rec_path
+                    data['file'][path_id] = load_rec_file(rec_path)
+                    del data['file'][rec_file]
         except (json.JSONDecodeError, OSError):
             pass
 
     return boda_data
 
-def generate_report():
-    pass
+def generate_report(data, hosts, pids, tids, labels):
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Assign a unique color for each event text
+    event_texts = list(labels.values())
+    pastel1 = plt.get_cmap('Pastel1')
+    tab20 = plt.get_cmap('tab20')
+
+    colors = [tab20(i) for i in range(20)] + [pastel1(i) for i in range(9)]  # 29 colors
+    cmap = {text: colors[i % 29] for i, text in enumerate(event_texts)}
+    color_map = {text: cmap[text] for text in event_texts}
+
+    legend_handles = []
+    eventtime_map  = {text: [] for text in event_texts}
+
+    sorted_rank_ids = sorted(data.keys())
+
+    #for i, (rank_id, events) in enumerate(sorted(data.items())):
+    for i, rank_id in enumerate(sorted_rank_ids):
+        events = data[rank_id]
+        events.sort(key=lambda x: x[0])
+        #sorted_data = sorted(data, key=lambda x: x[0])
+        for j in range(len(events) - 1):
+            start_time = events[j][0]
+            end_time, label_id = events[j+1]
+            text = labels[label_id]
+            eventtime_map[text].append(end_time - start_time)
+
+            ax.hlines(y=i, xmin=start_time, xmax=end_time,
+                      color=color_map[text], linewidth=9)
+
+        # Optional: mark the last point with a small line
+        #if len(events) >= 1:
+        #    last_time, last_text = events[-1]
+        #    ax.hlines(y=rank_id, xmin=last_time, xmax=last_time + 1,
+        #              color=color_map[last_text], linewidth=9)
+
+    # Build legend
+    for text, color in color_map.items():
+        if len(eventtime_map[text]) < 1:
+            continue
+
+        event_mean = statistics.mean(eventtime_map[text])
+        print(f"{text} , {event_mean}")
+        #if event_mean < 2:
+        #    continue
+
+        patch = mpatches.Patch(color=color, label=text)
+        legend_handles.append(patch)
+
+    #ax.set_xlim(0, start_time)
+    ax.set_xlabel("Time (seconds)")
+    ax.set_ylabel("Rank (LeadTime_LocalRank)")
+    ax.set_yticks(range(len(sorted_rank_ids)), sorted_rank_ids)
+    fig.suptitle("Training Step Timeline on Frontier nodes")
+    ax.set_title("Parallelized for 4 lead times")
+    ax.legend(handles=legend_handles, bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.grid(True)
+    plt.tight_layout()
+    plt.show()
+#    plt.savefig(f"timeline_plot_{num_nodes}.png", dpi=300)
+
+def merge_data(res_list):
+
+    hosts  = {}  # hostname: host_id
+    pids   = {}  # pid: pid_id
+    tids   = {}  # tid: tid_id
+    labels = {}  # tid: tid_id
+    data   = {}  # {(new host_id, new pid_id, new tid_id): [(ts, new label_id), ...])
+    inv_hosts = {}
+    inv_pids = {}
+    inv_tids = {}
+    inv_labels = {}
+
+    for idx, res in enumerate(res_list):
+        # host
+        new_hostid_map = {}
+        for host_id, host_name in res["host"].items():
+            if host_name not in hosts:
+                new_host_id = len(hosts)
+                hosts[host_name] = new_host_id
+                inv_hosts[new_host_id] = host_name
+            new_hostid_map[int(host_id)] = hosts[host_name]
+
+        # pid
+        new_pid_map = {}
+        for pid_id, pid_num in res["pid"].items():
+            if pid_num not in pids:
+                new_pid = len(pids)
+                pids[pid_num] = new_pid
+                inv_pids[new_pid] = pid_num
+            new_pid_map[int(pid_id)] = pids[pid_num]
+
+        # tid
+        new_tid_map = {}
+        for tid_num, tid_id in res["tid"].items():
+            if tid_num not in tids:
+                new_tid = len(tids)
+                tids[tid_num] = new_tid
+                inv_tids[new_tid] = tid_num
+            new_tid_map[int(tid_id)] = tids[tid_num]
+
+        # label
+        new_label_map = {}
+        for label_id, label_name in res["labels"].items():
+            if label_name not in labels:
+                new_label_id = len(labels)
+                labels[label_name] = new_label_id
+                inv_labels[new_label_id] = label_name
+            new_label_map[int(label_id)] = labels[label_name]
+
+        # records
+        for (hid, pid, tid), recs in res["file"].items():
+            new_recs = []
+            data[(new_hostid_map[hid], new_pid_map[pid], new_tid_map[tid])] = new_recs
+            for (ts, label_id) in recs:
+                new_recs.append((ts, new_label_map[label_id]))
+
+    return data, inv_hosts, inv_pids, inv_tids, inv_labels
 
 def analyze(args):
 
-    data = collect_events(args)
+    res_list = collect_events(args)
 
-    import pdb; pdb.set_trace()
-    generate_report()
+    data, hosts, pids, tids, labels = merge_data(res_list)
+
+    generate_report(data, hosts, pids, tids, labels)
 
 
 def main():
